@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+src/iec60287/__init__.py
+src/iec60287/__main__.py
+src/iec60287/main.py
+src/iec60287.egg-info/PKG-INFO
+src/iec60287.egg-info/SOURCES.txt
+src/iec60287.egg-info/dependency_links.txt
+src/iec60287.egg-info/requires.txt
+src/iec60287.egg-info/top_level.txt
+src/iec60287/gui/__init__.py
+src/iec60287/gui/items.py
+src/iec60287/gui/main_window.py
+src/iec60287/gui/placement_scene.py
+src/iec60287/gui/view.py
