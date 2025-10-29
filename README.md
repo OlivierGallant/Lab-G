@@ -1,4 +1,4 @@
-# IEC 60287 Cable Layout Prototype
+py# IEC 60287 Cable Layout Prototype
 
 Prototype PySide6 application for experimenting with cable placement prior to integrating IEC 60287 thermal calculations.
 
