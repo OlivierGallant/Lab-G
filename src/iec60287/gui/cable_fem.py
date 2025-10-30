@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from functools import partial
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -25,9 +28,55 @@ from iec60287.fem import (
     CableFemResult,
     MeshBuildOutput,
     MeshCableDefinition,
+    CableLoad,
     build_structured_mesh,
+    generate_report,
+    ReportPaths,
 )
 from iec60287.gui.placement_scene import PlacementScene
+
+
+class FemWorker(QObject):
+    progress = Signal(float)
+    finished = Signal(CableFemResult)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        mesh_output: MeshBuildOutput,
+        loads: Sequence[CableLoad],
+        *,
+        ambient_temp_c: float,
+        max_iterations: int,
+        tolerance_c: float,
+    ) -> None:
+        super().__init__()
+        self._mesh_output = mesh_output
+        self._loads = list(loads)
+        self._ambient_temp_c = ambient_temp_c
+        self._max_iterations = max_iterations
+        self._tolerance_c = tolerance_c
+
+    @Slot()
+    def run(self) -> None:
+        analyzer = CableFemAnalyzer(
+            max_iterations=self._max_iterations,
+            tolerance_c=self._tolerance_c,
+        )
+        try:
+            result = analyzer.solve(
+                self._mesh_output.mesh,
+                self._loads,
+                ambient_temp_c=self._ambient_temp_c,
+                progress_callback=self._handle_progress,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc))
+            return
+        self.finished.emit(result)
+
+    def _handle_progress(self, value: float) -> None:
+        self.progress.emit(max(0.0, min(1.0, value)))
 
 
 @dataclass
@@ -37,6 +86,7 @@ class FemCableEntry:
     y_mm: float
     radius_mm: float
     heat_w_per_m: float
+    auto_heat: bool
 
 
 class CableFEMPanel(QWidget):
@@ -66,6 +116,17 @@ class CableFEMPanel(QWidget):
         self._status_label = QLabel(self)
         self._refresh_button = QPushButton("Refresh from Scene", self)
         self._run_button = QPushButton("Run FEM Analysis", self)
+        self._progress_bar = QProgressBar(self)
+        self._progress_bar.setRange(0, 1000)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(False)
+
+        self._worker_thread: Optional[QThread] = None
+        self._worker: Optional[FemWorker] = None
+        self._pending_loads: List[CableLoad] = []
+        self._report_root = Path.cwd() / "fem_reports"
+        self._latest_report: Optional[ReportPaths] = None
+        self._report_root.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
         self._wire_signals()
@@ -91,6 +152,7 @@ class CableFEMPanel(QWidget):
         self._status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
+        layout.addWidget(self._progress_bar)
 
     def _build_parameters_group(self) -> QGroupBox:
         group = QGroupBox("Simulation Parameters", self)
@@ -204,7 +266,12 @@ class CableFEMPanel(QWidget):
         self._status_label.setText(message)
 
     def _rebuild_entries(self, mesh_output: MeshBuildOutput, preserve_overrides: bool) -> None:
-        overrides = dict(self._user_heat_overrides) if preserve_overrides else {}
+        if not preserve_overrides:
+            self._user_heat_overrides.clear()
+        valid_labels = {cable.label for cable in mesh_output.cables}
+        self._user_heat_overrides = {
+            label: value for label, value in self._user_heat_overrides.items() if label in valid_labels
+        }
         entries: List[FemCableEntry] = []
         missing_labels: List[str] = []
 
@@ -213,7 +280,14 @@ class CableFEMPanel(QWidget):
             default_heat = self._estimate_heat_from_definition(cable)
             if default_heat is None:
                 missing_labels.append(cable.label)
-            heat_value = overrides.get(cable.label, default_heat if default_heat is not None else 0.0)
+            heat_value = self._user_heat_overrides.get(
+                cable.label,
+                default_heat if default_heat is not None else 0.0,
+            )
+            auto_heat = default_heat is not None and (
+                cable.label not in self._user_heat_overrides
+                or (preserve_overrides and self._user_heat_overrides.get(cable.label) == default_heat)
+            )
             entries.append(
                 FemCableEntry(
                     label=cable.label,
@@ -221,12 +295,12 @@ class CableFEMPanel(QWidget):
                     y_mm=cable.centre_y_mm,
                     radius_mm=radius,
                     heat_w_per_m=heat_value,
+                    auto_heat=auto_heat,
                 )
             )
 
         self._entries = entries
         self._missing_current_labels = missing_labels
-        self._user_heat_overrides = {entry.label: entry.heat_w_per_m for entry in entries}
         self._populate_cable_table()
 
     def _populate_cable_table(self) -> None:
@@ -246,6 +320,9 @@ class CableFEMPanel(QWidget):
             spin.setValue(entry.heat_w_per_m)
             spin.blockSignals(False)
             spin.valueChanged.connect(partial(self._handle_heat_changed, row, entry.label))
+            spin.setToolTip(
+                "Auto-calculated from operating current" if entry.auto_heat else "Manual override"
+            )
             self._cable_table.setCellWidget(row, 4, spin)
 
         self._cable_table.resizeColumnsToContents()
@@ -258,6 +335,12 @@ class CableFEMPanel(QWidget):
 
     # -------------------------------------------------------------- simulation
     def _handle_run_clicked(self) -> None:
+        if self._worker_thread and self._worker_thread.isRunning():
+            return
+
+        self._pending_loads = []
+        self._latest_report = None
+
         try:
             mesh_output = build_structured_mesh(
                 self._scene,
@@ -272,27 +355,48 @@ class CableFEMPanel(QWidget):
         self._mesh_output = mesh_output
         self._rebuild_entries(mesh_output, preserve_overrides=True)
 
-        if not self._entries:
+        definition_lookup = {cable.label: cable for cable in mesh_output.cables}
+        loads: List[CableLoad] = []
+        for entry in self._entries:
+            definition = definition_lookup.get(entry.label)
+            if not definition:
+                continue
+            loads.append(
+                CableLoad(
+                    definition=definition,
+                    heat_w_per_m=max(entry.heat_w_per_m, 0.0),
+                    auto_update=entry.auto_heat,
+                )
+            )
+
+        if not loads:
             QMessageBox.information(self, "Cable FEM", "No cables available for analysis.")
             return
 
-        analyzer = CableFemAnalyzer(
+        self._pending_loads = loads
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
+        self._run_button.setEnabled(False)
+        self._refresh_button.setEnabled(False)
+        self._status_label.setText("Running FEM analysis...")
+
+        self._worker_thread = QThread(self)
+        self._worker = FemWorker(
+            mesh_output,
+            loads,
+            ambient_temp_c=self._ambient_spin.value(),
             max_iterations=self._max_iterations_spin.value(),
             tolerance_c=self._tolerance_spin.value(),
         )
-
-        try:
-            result = analyzer.solve(
-                mesh_output.mesh,
-                [entry.heat_w_per_m for entry in self._entries],
-                ambient_temp_c=self._ambient_spin.value(),
-                cable_definitions=mesh_output.cables,
-            )
-        except ValueError as exc:
-            QMessageBox.critical(self, "Cable FEM", str(exc))
-            return
-
-        self._populate_results(result)
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_worker_progress)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.error.connect(self._on_worker_error)
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.error.connect(self._worker_thread.quit)
+        self._worker_thread.finished.connect(self._on_worker_thread_finished)
+        self._worker_thread.start()
 
     def _populate_results(self, result: CableFemResult) -> None:
         self._result_table.setRowCount(len(result.cable_temperatures))
@@ -312,6 +416,73 @@ class CableFEMPanel(QWidget):
         item.setFlags(Qt.ItemIsEnabled)
         self._result_table.setItem(row, column, item)
 
+    def _apply_solver_heat_updates(self, result: CableFemResult, loads: Sequence[CableLoad]) -> None:
+        if not loads:
+            return
+        heat_map = {
+            load.definition.label: heat
+            for load, heat in zip(loads, result.heat_w_per_m)
+        }
+        for row, entry in enumerate(self._entries):
+            if not entry.auto_heat:
+                continue
+            new_heat = heat_map.get(entry.label)
+            if new_heat is None:
+                continue
+            entry.heat_w_per_m = new_heat
+            widget = self._cable_table.cellWidget(row, 4)
+            if isinstance(widget, QDoubleSpinBox):
+                widget.blockSignals(True)
+                widget.setValue(new_heat)
+                widget.blockSignals(False)
+                widget.setToolTip("Auto-calculated from operating current")
+
+    def _on_worker_progress(self, value: float) -> None:
+        maximum = self._progress_bar.maximum() or 1000
+        self._progress_bar.setValue(int(max(0.0, min(1.0, value)) * maximum))
+
+    def _on_worker_finished(self, result: CableFemResult) -> None:
+        loads = list(self._pending_loads)
+        self._pending_loads.clear()
+        self._progress_bar.setValue(self._progress_bar.maximum())
+        self._progress_bar.setVisible(False)
+        self._run_button.setEnabled(True)
+        self._refresh_button.setEnabled(True)
+        self._populate_results(result)
+        self._apply_solver_heat_updates(result, loads)
+
+        report_msg = ""
+        if self._mesh_output is not None:
+            try:
+                self._latest_report = generate_report(
+                    self._mesh_output,
+                    result,
+                    root_dir=self._report_root,
+                )
+                report_msg = f" | Report saved to {self._latest_report.base_dir}"  # pragma: no cover
+            except Exception as exc:  # noqa: BLE001
+                self._latest_report = None
+                QMessageBox.warning(self, "Cable FEM", f"Report generation failed: {exc}")
+
+        if report_msg:
+            self._status_label.setText(f"{self._status_label.text()}{report_msg}")
+
+    def _on_worker_error(self, message: str) -> None:
+        self._pending_loads.clear()
+        self._progress_bar.setVisible(False)
+        self._run_button.setEnabled(True)
+        self._refresh_button.setEnabled(True)
+        self._latest_report = None
+        QMessageBox.critical(self, "Cable FEM", message)
+
+    def _on_worker_thread_finished(self) -> None:
+        if self._worker:
+            self._worker.deleteLater()
+        if self._worker_thread:
+            self._worker_thread.deleteLater()
+        self._worker_thread = None
+        self._worker = None
+
     # ----------------------------------------------------------------- helpers
     def _infer_soil_resistivity(self) -> Optional[float]:
         layers = self._scene.config.layers
@@ -321,8 +492,13 @@ class CableFEMPanel(QWidget):
 
     def _handle_heat_changed(self, row: int, label: str, value: float) -> None:
         if 0 <= row < len(self._entries):
-            self._entries[row].heat_w_per_m = value
+            entry = self._entries[row]
+            entry.heat_w_per_m = value
+            entry.auto_heat = False
             self._user_heat_overrides[label] = value
+            widget = self._cable_table.cellWidget(row, 4)
+            if isinstance(widget, QDoubleSpinBox):
+                widget.setToolTip("Manual override")
         else:
             self._user_heat_overrides[label] = value
 

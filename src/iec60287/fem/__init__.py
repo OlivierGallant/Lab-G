@@ -8,20 +8,24 @@ dependencies, while still giving users an intuitive comparison point against
 the IEC 60287 analytical results.
 """
 
-from .analyzer import CableFemAnalyzer, CableFemResult, CableTemperature
+from .analyzer import CableFemAnalyzer, CableFemResult, CableTemperature, CableLoad
 from .mesh_builder import (
     MeshBuildOutput,
     MeshCableDefinition,
     StructuredMesh,
     build_structured_mesh,
 )
+from .report import generate_report, ReportPaths
 
 __all__ = [
     "CableFemAnalyzer",
     "CableFemResult",
     "CableTemperature",
+    "CableLoad",
     "MeshBuildOutput",
     "MeshCableDefinition",
     "StructuredMesh",
     "build_structured_mesh",
+    "generate_report",
+    "ReportPaths",
 ]

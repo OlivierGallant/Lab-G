@@ -39,6 +39,8 @@ class MeshCableDefinition:
     conductor_resistivity_ohm_mm2_per_m: Optional[float]
     conductor_temp_coefficient_per_c: float
     nominal_current_a: Optional[float]
+    insulation_thickness_mm: Optional[float]
+    layer_thicknesses_mm: List[Tuple[LayerRole, float]]
 
     @property
     def conductor_radius_mm(self) -> float:
@@ -139,7 +141,7 @@ def _build_cable_definition(
 ) -> Optional[MeshCableDefinition]:
     if system.kind is CableSystemKind.SINGLE_CORE and system.single_core_phase:
         phase = system.single_core_phase
-        layers = _build_layers_from_phase(phase)
+        layers, thicknesses = _build_layers_from_phase(phase)
         if not layers:
             return None
         conductor = phase.conductor
@@ -152,12 +154,14 @@ def _build_cable_definition(
             conductor_resistivity_ohm_mm2_per_m=conductor.electrical_resistivity(),
             conductor_temp_coefficient_per_c=conductor.material.temp_coefficient_per_c or 0.0,
             nominal_current_a=system.nominal_current_a,
+            insulation_thickness_mm=_find_layer_thickness(thicknesses, LayerRole.INSULATION),
+            layer_thicknesses_mm=list(thicknesses),
         )
 
     if system.kind is CableSystemKind.MULTICORE and system.multicore:
         multicore = system.multicore
         phase = multicore.phase
-        layers = _build_layers_from_phase(phase)
+        layers, thicknesses = _build_layers_from_phase(phase)
         outer_radius = multicore.outer_diameter_mm / 2.0
         if not layers:
             # Fallback to a single region covering the cable
@@ -168,6 +172,7 @@ def _build_cable_definition(
                     thermal_resistivity_k_m_per_w=_DEFAULT_LAYER_RESISTIVITY,
                 )
             ]
+            thicknesses = [(LayerRole.SHEATH, outer_radius)]
         if layers[-1].outer_radius_mm < outer_radius:
             layers[-1].outer_radius_mm = outer_radius
         conductor = phase.conductor
@@ -180,13 +185,16 @@ def _build_cable_definition(
             conductor_resistivity_ohm_mm2_per_m=conductor.electrical_resistivity(),
             conductor_temp_coefficient_per_c=conductor.material.temp_coefficient_per_c or 0.0,
             nominal_current_a=system.nominal_current_a,
+            insulation_thickness_mm=_find_layer_thickness(thicknesses, LayerRole.INSULATION),
+            layer_thicknesses_mm=list(thicknesses),
         )
 
     return None
 
 
-def _build_layers_from_phase(phase: CablePhase) -> List[CableLayerRegion]:
+def _build_layers_from_phase(phase: CablePhase) -> Tuple[List[CableLayerRegion], List[Tuple[LayerRole, float]]]:
     layers: List[CableLayerRegion] = []
+    thicknesses: List[Tuple[LayerRole, float]] = []
     conductor = phase.conductor
     conductor_radius = conductor.diameter_mm / 2.0
     conductor_res = _clamped_resistivity(conductor.thermal_resistivity() or conductor.material.thermal_resistivity_k_m_per_w)
@@ -200,6 +208,7 @@ def _build_layers_from_phase(phase: CablePhase) -> List[CableLayerRegion]:
         )
     )
 
+    previous_radius = conductor_radius
     for layer_spec, _inner_radius, outer_radius in phase.radial_profile_mm():
         res = _clamped_resistivity(layer_spec.thermal_resistivity())
         if res is None:
@@ -213,7 +222,9 @@ def _build_layers_from_phase(phase: CablePhase) -> List[CableLayerRegion]:
                 thermal_resistivity_k_m_per_w=res,
             )
         )
-    return layers
+        thicknesses.append((layer_spec.role, max(outer_radius - previous_radius, 0.0)))
+        previous_radius = outer_radius
+    return layers, thicknesses
 
 
 def _layer_label(layer_spec: LayerSpec) -> str:
@@ -221,6 +232,13 @@ def _layer_label(layer_spec: LayerSpec) -> str:
     if role is None:
         return "Layer"
     return role.name.replace("_", " ").title()
+
+
+def _find_layer_thickness(thicknesses: Sequence[Tuple[LayerRole, float]], target: LayerRole) -> Optional[float]:
+    for role, thickness in thicknesses:
+        if role is target:
+            return thickness if thickness > 0.0 else None
+    return None
 
 
 def _build_domain(
@@ -234,34 +252,54 @@ def _build_domain(
     trench_depth = max(scene.config.trench_depth_mm, 10.0)
 
     if cables:
-        min_cable_x = min(cable.centre_x_mm - cable.overall_radius_mm for cable in cables)
-        max_cable_x = max(cable.centre_x_mm + cable.overall_radius_mm for cable in cables)
-        min_x = min(-half_trench_width, min_cable_x) - padding_mm
-        max_x = max(half_trench_width, max_cable_x) + padding_mm
-        max_cable_y = max(cable.centre_y_mm + cable.overall_radius_mm for cable in cables)
+        min_x = min(c.centre_x_mm - max(padding_mm, 10.0 * c.overall_radius_mm) for c in cables)
+        max_x = max(c.centre_x_mm + max(padding_mm, 10.0 * c.overall_radius_mm) for c in cables)
+        min_y = min(c.centre_y_mm - max(padding_mm, 10.0 * c.overall_radius_mm) for c in cables)
+        max_y = max(c.centre_y_mm + max(padding_mm, 10.0 * c.overall_radius_mm) for c in cables)
+        min_x = min(min_x, -half_trench_width - padding_mm)
+        max_x = max(max_x, half_trench_width + padding_mm)
+        max_trench_y = surface_y + trench_depth + padding_mm
+        max_y = max(max_y, max_trench_y)
+        min_y = min(min_y, surface_y - max(padding_mm, 10.0 * max(c.overall_radius_mm for c in cables)))
     else:
         min_x = -half_trench_width - padding_mm
         max_x = half_trench_width + padding_mm
-        max_cable_y = surface_y + trench_depth
+        min_y = surface_y - padding_mm
+        max_y = surface_y + trench_depth + padding_mm
 
-    min_y = surface_y - padding_mm
-    max_y = max(max_cable_y, surface_y + trench_depth) + padding_mm
+    gap_limit = _minimum_gap_spacing(cables)
+    growth = 1.2
+    far_spacing = max(grid_step_mm, 10.0)
 
-    x_nodes: List[float] = []
-    value = min_x
-    while value < max_x:
-        x_nodes.append(value)
-        value += grid_step_mm
-    if not x_nodes or x_nodes[-1] < max_x:
-        x_nodes.append(max_x)
+    x_nodes = _generate_axis_nodes(
+        cables,
+        min_x,
+        max_x,
+        axis="x",
+        growth_factor=growth,
+        gap_limit=gap_limit,
+        default_far_spacing=far_spacing,
+    )
 
-    y_nodes: List[float] = []
-    value = min_y
-    while value < max_y:
-        y_nodes.append(value)
-        value += grid_step_mm
-    if not y_nodes or y_nodes[-1] < max_y:
-        y_nodes.append(max_y)
+    y_nodes = _generate_axis_nodes(
+        cables,
+        min_y,
+        max_y,
+        axis="y",
+        growth_factor=growth,
+        gap_limit=gap_limit,
+        default_far_spacing=far_spacing,
+    )
+
+    # Ensure key horizontal interfaces exist
+    if surface_y not in y_nodes:
+        y_nodes.append(surface_y)
+    bottom_trench = surface_y + trench_depth
+    if bottom_trench not in y_nodes:
+        y_nodes.append(bottom_trench)
+
+    x_nodes = _uniformize_axis_nodes(x_nodes)
+    y_nodes = _uniformize_axis_nodes(y_nodes)
 
     return x_nodes, y_nodes
 
@@ -388,3 +426,114 @@ def _clamped_resistivity(value: Optional[float]) -> Optional[float]:
     if value <= 0.0:
         return _MIN_RESISTIVITY
     return value
+
+
+def _minimum_gap_spacing(cables: Sequence[MeshCableDefinition]) -> Optional[float]:
+    min_limit: Optional[float] = None
+    for index, first in enumerate(cables):
+        for second in cables[index + 1 :]:
+            dx = first.centre_x_mm - second.centre_x_mm
+            dy = first.centre_y_mm - second.centre_y_mm
+            centre_distance = math.hypot(dx, dy)
+            separation = centre_distance - (first.overall_radius_mm + second.overall_radius_mm)
+            if separation <= 0.0:
+                continue
+            candidate = separation * 0.15
+            if min_limit is None or candidate < min_limit:
+                min_limit = candidate
+    return min_limit
+
+
+def _near_field_spacing(cable: MeshCableDefinition, gap_limit: Optional[float]) -> float:
+    candidates: List[float] = []
+    conductor_diameter = cable.layers[0].outer_radius_mm * 2.0 if cable.layers else 0.0
+    if conductor_diameter > 0.0:
+        candidates.append(conductor_diameter / 40.0)
+        circumference = 2.0 * math.pi * (conductor_diameter / 2.0)
+        if circumference > 0.0:
+            candidates.append(circumference / 96.0)
+    insulation = cable.insulation_thickness_mm
+    if insulation and insulation > 0.0:
+        candidates.append(insulation / 12.0)
+    for role, thickness in cable.layer_thicknesses_mm:
+        if thickness <= 0.0:
+            continue
+        required = 12 if role is LayerRole.INSULATION else 6
+        candidates.append(thickness / required)
+    if gap_limit is not None and gap_limit > 0.0:
+        candidates.append(gap_limit)
+    candidates = [value for value in candidates if value > 0.0]
+    if not candidates:
+        return 5.0
+    return max(0.1, min(candidates))
+
+
+def _soil_spacing(cable: MeshCableDefinition, default_far_spacing: float) -> float:
+    diameter = cable.overall_radius_mm * 2.0
+    return max(default_far_spacing, diameter * 0.5)
+
+
+def _generate_axis_nodes(
+    cables: Sequence[MeshCableDefinition],
+    min_bound: float,
+    max_bound: float,
+    *,
+    axis: str,
+    growth_factor: float,
+    gap_limit: Optional[float],
+    default_far_spacing: float,
+) -> List[float]:
+    if not cables:
+        return [min_bound, max_bound]
+
+    positions: set[float] = {min_bound, max_bound}
+    eps = 1e-6
+    for cable in cables:
+        center = cable.centre_x_mm if axis == "x" else cable.centre_y_mm
+        positions.add(center)
+
+        near_spacing = _near_field_spacing(cable, gap_limit)
+        far_spacing = max(_soil_spacing(cable, default_far_spacing), near_spacing)
+
+        # positive direction
+        step = near_spacing
+        distance = near_spacing
+        while center + distance < max_bound - eps:
+            positions.add(center + distance)
+            step = min(step * growth_factor, far_spacing)
+            distance += step
+
+        # negative direction
+        step = near_spacing
+        distance = near_spacing
+        while center - distance > min_bound + eps:
+            positions.add(center - distance)
+            step = min(step * growth_factor, far_spacing)
+            distance += step
+
+    return sorted(positions)
+
+
+def _uniformize_axis_nodes(nodes: Sequence[float]) -> List[float]:
+    unique = sorted(set(nodes))
+    if len(unique) < 2:
+        return list(unique)
+    diffs = [unique[i + 1] - unique[i] for i in range(len(unique) - 1)]
+    positive_diffs = [diff for diff in diffs if diff > 1e-6]
+    if not positive_diffs:
+        return list(unique)
+    min_step = min(positive_diffs)
+    start = unique[0]
+    end = unique[-1]
+    span = max(end - start, min_step)
+
+    max_cells = 1600
+    min_allowed_step = span / max_cells
+    step = max(min_step, min_allowed_step)
+
+    steps = max(1, int(round(span / step)))
+    step = span / steps if steps > 0 else step
+
+    result = [start + i * step for i in range(steps + 1)]
+    result.append(end)
+    return sorted(set(result))

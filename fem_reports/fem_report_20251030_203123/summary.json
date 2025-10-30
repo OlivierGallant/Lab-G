@@ -1,0 +1,38 @@
+{
+  "max_field_temp_c": 20.000827518429137,
+  "min_field_temp_c": 19.999999999999996,
+  "converged": true,
+  "iterations": 2,
+  "cables": [
+    {
+      "label": "Cable System 1 A",
+      "centre_x_mm": -150.0,
+      "centre_y_mm": 600.0,
+      "overall_radius_mm": 20.4,
+      "nominal_current_a": 45.0,
+      "heat_w_per_m": 0.14547113054872193,
+      "max_temp_c": 20.00041181033924,
+      "average_temp_c": 20.000066248462975
+    },
+    {
+      "label": "Cable System 1 B",
+      "centre_x_mm": 0.0,
+      "centre_y_mm": 600.0,
+      "overall_radius_mm": 20.4,
+      "nominal_current_a": 45.0,
+      "heat_w_per_m": 0.14547112584021651,
+      "max_temp_c": 20.000401766176296,
+      "average_temp_c": 20.000069865487493
+    },
+    {
+      "label": "Cable System 1 C",
+      "centre_x_mm": 150.0,
+      "centre_y_mm": 600.0,
+      "overall_radius_mm": 20.4,
+      "nominal_current_a": 45.0,
+      "heat_w_per_m": 0.14547113054872193,
+      "max_temp_c": 20.000411810339212,
+      "average_temp_c": 20.000066248462975
+    }
+  ]
+}
