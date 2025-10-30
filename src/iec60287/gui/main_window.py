@@ -15,6 +15,9 @@ from iec60287.gui.placement_scene import PlacementScene
 from iec60287.gui.view import PlacementView
 from iec60287.gui.items import CableSystemItem
 from iec60287.gui.system_editor import CableSystemEditor
+from iec60287.gui.trench_designer import TrenchDesigner
+from iec60287.gui.ampacity_calculator import CableAmpacityCalculator
+from iec60287.gui.cable_fem import CableFEMPanel
 
 
 class MainWindow(QMainWindow):
@@ -36,7 +39,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         self._system_editor = CableSystemEditor(self)
+        self._trench_designer = TrenchDesigner(self.scene, self)
+        self._ampacity_calculator = CableAmpacityCalculator(self.scene, self)
+        self._fem_panel = CableFEMPanel(self.scene, self)
         self._editor_dock = self._create_editor_dock()
+        self._trench_dock = self._create_trench_dock()
+        self._calculator_dock = self._create_calculator_dock()
+        self._fem_dock = self._create_fem_dock()
 
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
@@ -47,7 +56,7 @@ class MainWindow(QMainWindow):
         self._seed_scene()
         self._update_status()
         self._handle_selection_changed()
-
+        self.scene.changed.connect(self._handle_scene_changed)
         self.scene.selectionChanged.connect(self._handle_selection_changed)
 
     def _create_toolbar(self) -> None:
@@ -60,11 +69,6 @@ class MainWindow(QMainWindow):
         add_cable_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
         add_cable_action.triggered.connect(self._handle_add_cable)
         toolbar.addAction(add_cable_action)
-
-        add_backfill_action = QAction("Add Backfill", self)
-        add_backfill_action.setShortcut(QKeySequence("Ctrl+Shift+B"))
-        add_backfill_action.triggered.connect(self._handle_add_backfill)
-        toolbar.addAction(add_backfill_action)
 
         toolbar.addSeparator()
 
@@ -80,7 +84,6 @@ class MainWindow(QMainWindow):
 
         self._actions = {
             "add_cable": add_cable_action,
-            "add_backfill": add_backfill_action,
             "delete": delete_action,
             "fit": fit_action,
         }
@@ -88,7 +91,11 @@ class MainWindow(QMainWindow):
     def _create_menus(self) -> None:
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self._editor_dock.toggleViewAction())
-
+        tools_menu.addAction(self._trench_dock.toggleViewAction())
+        calculations_menu = self.menuBar().addMenu("&Calculations")
+        calculations_menu.addAction(self._calculator_dock.toggleViewAction())
+        calculations_menu.addAction(self._fem_dock.toggleViewAction())
+        about_menu = self.menuBar().addMenu("&About")
     def _create_shortcuts(self) -> None:
         delete_shortcut = QShortcut(QKeySequence.Delete, self)
         delete_shortcut.activated.connect(self._handle_delete_selected)
@@ -108,11 +115,46 @@ class MainWindow(QMainWindow):
         self.resizeDocks([dock], [360], Qt.Vertical)
         return dock
 
+    def _create_trench_dock(self) -> QDockWidget:
+        dock = QDockWidget("Trench Designer", self)
+        dock.setObjectName("TrenchDesignerDock")
+        dock.setWidget(self._trench_designer)
+        dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
+        dock.setMinimumHeight(260)
+        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        self.tabifyDockWidget(self._editor_dock, dock)
+        dock.raise_()
+        return dock
+
+    def _create_calculator_dock(self) -> QDockWidget:
+        dock = QDockWidget("Cable Ampacity Calculator", self)
+        dock.setObjectName("CableAmpacityCalculatorDock")
+        dock.setWidget(self._ampacity_calculator)
+        dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
+        dock.setMinimumHeight(260)
+        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        self.tabifyDockWidget(self._editor_dock, dock)
+        return dock
+
+    def _create_fem_dock(self) -> QDockWidget:
+        dock = QDockWidget("Cable FEM", self)
+        dock.setObjectName("CableFEMDock")
+        dock.setWidget(self._fem_panel)
+        dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
+        dock.setMinimumHeight(260)
+        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        self.tabifyDockWidget(self._calculator_dock, dock)
+        return dock
+
     def _seed_scene(self) -> None:
         center = QPointF(0.0, 0.0)
-        self.scene.add_backfill(center)
         self.scene.add_cable(center)
         self._fit_view()
+        self._trench_designer.refresh_systems()
+        self._refresh_calculators(force_fem=True)
 
     def _scene_center(self) -> QPointF:
         rect = self.view.viewport().rect()
@@ -121,15 +163,15 @@ class MainWindow(QMainWindow):
     def _handle_add_cable(self) -> None:
         self.scene.add_cable(self._scene_center())
         self._handle_selection_changed()
-
-    def _handle_add_backfill(self) -> None:
-        self.scene.add_backfill(self._scene_center())
-        self._update_status()
+        self._trench_designer.refresh_systems()
+        self._refresh_calculators()
 
     def _handle_delete_selected(self) -> None:
         if self.scene.selectedItems():
             self.scene.remove_selected()
             self._handle_selection_changed()
+            self._trench_designer.refresh_systems()
+            self._refresh_calculators()
 
     def _fit_view(self) -> None:
         rect = self.scene.sceneRect()
@@ -148,4 +190,14 @@ class MainWindow(QMainWindow):
             None,
         )
         self._system_editor.set_item(selected)
+        self._trench_designer.set_selected_item(selected)
+        self._trench_designer.refresh_systems()
+        self._refresh_calculators()
         self._update_status()
+
+    def _handle_scene_changed(self, *_) -> None:
+        self._refresh_calculators()
+
+    def _refresh_calculators(self, *, force_fem: bool = False) -> None:
+        self._ampacity_calculator.refresh_from_scene()
+        self._fem_panel.refresh_from_scene(force=force_fem)

@@ -12,4 +12,9 @@ src/iec60287/gui/__init__.py
 src/iec60287/gui/items.py
 src/iec60287/gui/main_window.py
 src/iec60287/gui/placement_scene.py
+src/iec60287/gui/system_editor.py
+src/iec60287/gui/trench_designer.py
 src/iec60287/gui/view.py
+src/iec60287/model/__init__.py
+src/iec60287/model/cable_system.py
+src/iec60287/model/materials.py

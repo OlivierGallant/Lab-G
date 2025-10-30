@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -20,6 +21,33 @@ from iec60287.model import (
 from iec60287.model import materials as material_catalog
 
 
+class TrenchLayerKind(Enum):
+    GROUND = "ground"
+    BACKFILL = "backfill"
+    CONCRETE = "concrete"
+    AIR = "air"
+    CUSTOM = "custom"
+
+
+@dataclass
+class TrenchLayer:
+    name: str
+    kind: TrenchLayerKind
+    thickness_mm: float
+    thermal_resistivity_k_m_per_w: float
+
+
+def default_trench_layers() -> List[TrenchLayer]:
+    return [
+        TrenchLayer(
+            name="Native Soil",
+            kind=TrenchLayerKind.GROUND,
+            thickness_mm=1200,
+            thermal_resistivity_k_m_per_w=1.25,
+        ),
+    ]
+
+
 @dataclass
 class SceneConfig:
     scene_size: float = 2000.0  # mm
@@ -30,7 +58,8 @@ class SceneConfig:
     major_grid_colour: QColor = field(default_factory=lambda: QColor("#adb5bd"))
     trench_width_mm: float = 1200.0
     trench_depth_mm: float = 1200.0
-    surface_level_y: float = -300.0
+    surface_level_y: float = 0.0
+    layers: List[TrenchLayer] = field(default_factory=default_trench_layers)
 
 
 class PlacementScene(QGraphicsScene):
@@ -56,19 +85,12 @@ class PlacementScene(QGraphicsScene):
         self._spawn_item(item, spawn_pos)
         return item
 
-    def add_backfill(self, position: Optional[QPointF] = None) -> BackfillItem:
-        self._backfill_count += 1
-        label = f"Backfill {self._backfill_count}"
-        item = BackfillItem(label)
-        spawn_pos = position or self._default_backfill_position()
-        self._spawn_item(item, spawn_pos)
-        return item
-
     def remove_selected(self) -> None:
         for item in list(self.selectedItems()):
             if isinstance(item, CableSystemItem):
                 self._systems.pop(item.system.identifier, None)
             self.removeItem(item)
+        self.invalidate()
 
     def _spawn_item(self, item, position: Optional[QPointF]) -> None:
         pos = position or QPointF(0.0, 0.0)
@@ -79,6 +101,7 @@ class PlacementScene(QGraphicsScene):
             best_pos = self._find_available_position(item, item.pos())
             if best_pos != item.pos():
                 item.setPos(best_pos)
+            self._systems[item.system.identifier] = item
         self.clearSelection()
         item.setSelected(True)
         self.invalidate()
@@ -111,12 +134,38 @@ class PlacementScene(QGraphicsScene):
         """Return the cable system data present in the scene."""
         return [item.system for item in self._systems.values()]
 
+    def system_items(self) -> List[CableSystemItem]:
+        return list(self._systems.values())
+
+    def update_trench_geometry(
+        self,
+        *,
+        width_mm: Optional[float] = None,
+        depth_mm: Optional[float] = None,
+        surface_level_y: Optional[float] = None,
+    ) -> None:
+        if width_mm is not None and width_mm > 0.0:
+            self.config.trench_width_mm = width_mm
+        if depth_mm is not None and depth_mm > 0.0:
+            self.config.trench_depth_mm = depth_mm
+        if surface_level_y is not None:
+            self.config.surface_level_y = surface_level_y
+        self.refresh_after_config_change()
+
+    def update_trench_layers(self, layers: List[TrenchLayer]) -> None:
+        self.config.layers = list(layers)
+        self.refresh_after_config_change()
+
+    def refresh_after_config_change(self) -> None:
+        for item in self._systems.values():
+            item.scene_config = self.config
+            item.ensure_valid_position()
+            item.update()
+        self.invalidate()
+        self.update()
+
     def _default_cable_position(self) -> QPointF:
         y = self.config.surface_level_y + self.config.trench_depth_mm * 0.5
-        return QPointF(0.0, y)
-
-    def _default_backfill_position(self) -> QPointF:
-        y = self.config.surface_level_y + self.config.trench_depth_mm * 0.25
         return QPointF(0.0, y)
 
     def _build_default_single_core_system(self, index: int) -> CableSystem:
@@ -156,6 +205,16 @@ class PlacementScene(QGraphicsScene):
             nominal_voltage_kv=11.0,
         )
 
+    def _layer_colour(self, layer: TrenchLayer) -> QColor:
+        base_colours = {
+            TrenchLayerKind.GROUND: QColor("#c0a080"),
+            TrenchLayerKind.BACKFILL: QColor("#ffe066"),
+            TrenchLayerKind.CONCRETE: QColor("#adb5bd"),
+            TrenchLayerKind.AIR: QColor("#d0ebff"),
+            TrenchLayerKind.CUSTOM: QColor("#ced4da"),
+        }
+        return base_colours.get(layer.kind, QColor("#ced4da"))
+
     def _draw_trench(self, painter: QPainter, rect: QRectF) -> None:
         width = self.config.trench_width_mm
         depth = self.config.trench_depth_mm
@@ -163,8 +222,28 @@ class PlacementScene(QGraphicsScene):
         trench_rect = QRectF(-width / 2.0, surface_y, width, depth)
 
         painter.save()
+        current_y = surface_y
+        remaining = depth
+        for layer in self.config.layers:
+            thickness = max(layer.thickness_mm, 0.0)
+            if thickness <= 0.0 or remaining <= 0.0:
+                continue
+            layer_height = min(thickness, remaining)
+            colour = self._layer_colour(layer)
+            painter.setPen(QPen(colour.darker(140), 1.0))
+            painter.setBrush(colour)
+            painter.drawRect(QRectF(-width / 2.0, current_y, width, layer_height))
+            current_y += layer_height
+            remaining -= layer_height
+
+        if remaining > 0.0:
+            fallback_colour = QColor("#d7ccc8")
+            painter.setPen(QPen(fallback_colour.darker(140), 1.0))
+            painter.setBrush(fallback_colour)
+            painter.drawRect(QRectF(-width / 2.0, current_y, width, remaining))
+
         painter.setPen(QPen(QColor("#795548"), 2.0))
-        painter.setBrush(QColor("#d7ccc8"))
+        painter.setBrush(Qt.NoBrush)
         painter.drawRect(trench_rect)
 
         surface_pen = QPen(QColor("#5d4037"), 3.0)

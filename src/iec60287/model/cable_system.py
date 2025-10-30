@@ -89,6 +89,19 @@ class LayerSpec:
     role: LayerRole
     thickness_mm: float
     material: Material
+    electrical_resistivity_override_ohm_mm2_per_m: Optional[float] = None
+    thermal_resistivity_override_k_m_per_w: Optional[float] = None
+    filling_grade: Optional[float] = None
+
+    def electrical_resistivity(self) -> Optional[float]:
+        if self.electrical_resistivity_override_ohm_mm2_per_m is not None:
+            return self.electrical_resistivity_override_ohm_mm2_per_m
+        return self.material.electrical_resistivity_ohm_mm2_per_m
+
+    def thermal_resistivity(self) -> Optional[float]:
+        if self.thermal_resistivity_override_k_m_per_w is not None:
+            return self.thermal_resistivity_override_k_m_per_w
+        return self.material.thermal_resistivity_k_m_per_w
 
 
 @dataclass
@@ -98,6 +111,19 @@ class ConductorSpec:
     area_mm2: float
     diameter_mm: float
     material: Material
+    electrical_resistivity_override_ohm_mm2_per_m: Optional[float] = None
+    thermal_resistivity_override_k_m_per_w: Optional[float] = None
+    filling_grade: Optional[float] = None
+
+    def electrical_resistivity(self) -> Optional[float]:
+        if self.electrical_resistivity_override_ohm_mm2_per_m is not None:
+            return self.electrical_resistivity_override_ohm_mm2_per_m
+        return self.material.electrical_resistivity_ohm_mm2_per_m
+
+    def thermal_resistivity(self) -> Optional[float]:
+        if self.thermal_resistivity_override_k_m_per_w is not None:
+            return self.thermal_resistivity_override_k_m_per_w
+        return self.material.thermal_resistivity_k_m_per_w
 
 
 @dataclass
@@ -209,9 +235,9 @@ class CableSystem:
                 # Equilateral triangle with side length equal to spacing.
                 r = spacing / math.sqrt(3.0)
                 return (
-                    (0.0, 2.0 * r / 3.0),
-                    (-spacing / 2.0, -r / 3.0),
-                    (spacing / 2.0, -r / 3.0),
+                    (0.0, 2.0 * -r / math.sqrt(3.0)),
+                    (-spacing / 2.0, r / 3.0),
+                    (spacing / 2.0, r / 3.0),
                 )
         elif self.kind is CableSystemKind.MULTICORE:
             return ((0.0, 0.0),)

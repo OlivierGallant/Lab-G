@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 from iec60287.model import (
@@ -91,6 +91,8 @@ class CableItem(BaseGraphicsItem):
 
 class CableSystemItem(BaseGraphicsItem):
     """Composite graphics item representing a three-phase cable system."""
+
+    positionChanged = Signal(QPointF)
 
     _PHASE_LABELS = ("A", "B", "C")
     _PHASE_COLOURS = (
@@ -315,7 +317,10 @@ class CableSystemItem(BaseGraphicsItem):
             if isinstance(value, QPointF):
                 if not self.position_is_allowed(value):
                     return self.pos()
-        return super().itemChange(change, value)
+        result = super().itemChange(change, value)
+        if change == QGraphicsItem.ItemPositionHasChanged:
+            self.positionChanged.emit(self.pos())
+        return result
 
     def position_is_allowed(self, pos: QPointF) -> bool:
         geometry = self._phase_world_geometry(pos)
