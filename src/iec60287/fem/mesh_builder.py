@@ -515,25 +515,22 @@ def _generate_axis_nodes(
 
 
 def _uniformize_axis_nodes(nodes: Sequence[float]) -> List[float]:
-    unique = sorted(set(nodes))
-    if len(unique) < 2:
-        return list(unique)
-    diffs = [unique[i + 1] - unique[i] for i in range(len(unique) - 1)]
-    positive_diffs = [diff for diff in diffs if diff > 1e-6]
-    if not positive_diffs:
-        return list(unique)
-    min_step = min(positive_diffs)
-    start = unique[0]
-    end = unique[-1]
-    span = max(end - start, min_step)
+    if not nodes:
+        return []
 
-    max_cells = 1600
-    min_allowed_step = span / max_cells
-    step = max(min_step, min_allowed_step)
+    sorted_nodes = sorted(nodes)
+    result: List[float] = [sorted_nodes[0]]
 
-    steps = max(1, int(round(span / step)))
-    step = span / steps if steps > 0 else step
+    # Merge nodes that are effectively identical due to floating-point noise
+    tolerance = 1e-4
+    for value in sorted_nodes[1:]:
+        if value - result[-1] > tolerance:
+            result.append(value)
+        else:
+            # Preserve the extremal value when collapsing near-duplicates
+            result[-1] = max(result[-1], value)
 
-    result = [start + i * step for i in range(steps + 1)]
-    result.append(end)
-    return sorted(set(result))
+    if result[-1] != sorted_nodes[-1]:
+        result[-1] = sorted_nodes[-1]
+
+    return result
