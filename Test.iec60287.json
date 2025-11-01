@@ -1,0 +1,155 @@
+{
+  "scene": {
+    "trench_width_mm": 1200.0,
+    "trench_depth_mm": 1200.0,
+    "surface_level_y": 0.0,
+    "layers": [
+      {
+        "name": "Native Soil",
+        "kind": "ground",
+        "thickness_mm": 1200.0,
+        "thermal_resistivity_k_m_per_w": 1.5
+      }
+    ]
+  },
+  "cable_systems": [
+    {
+      "position": {
+        "x": 0.0,
+        "y": 600.0
+      },
+      "system": {
+        "name": "Cable System 1",
+        "kind": "single_core",
+        "phase_spacing_mm": 42.0,
+        "identifier": "fa7fe91895d94cdcb1573999936009e9",
+        "nominal_current_a": 200.0,
+        "nominal_voltage_kv": 11.0,
+        "arrangement": "flat",
+        "single_core_phase": {
+          "name": "Phase",
+          "conductor": {
+            "area_mm2": 240.0,
+            "diameter_mm": 17.6,
+            "material": {
+              "name": "Copper",
+              "catalog": true
+            }
+          },
+          "layers": [
+            {
+              "role": "inner_screen",
+              "thickness_mm": 1.2,
+              "material": {
+                "name": "Semi-Conductive Compound",
+                "catalog": true
+              }
+            },
+            {
+              "role": "insulation",
+              "thickness_mm": 5.5,
+              "material": {
+                "name": "XLPE",
+                "catalog": true
+              }
+            },
+            {
+              "role": "outer_screen",
+              "thickness_mm": 1.2,
+              "material": {
+                "name": "Semi-Conductive Compound",
+                "catalog": true
+              }
+            },
+            {
+              "role": "sheath",
+              "thickness_mm": 2.5,
+              "material": {
+                "name": "PVC",
+                "catalog": true
+              }
+            },
+            {
+              "role": "serving",
+              "thickness_mm": 1.2,
+              "material": {
+                "name": "PE Serving",
+                "catalog": true
+              }
+            }
+          ],
+          "rated_voltage_kv": null
+        }
+      }
+    },
+    {
+      "position": {
+        "x": -50.0,
+        "y": 45.06172839506173
+      },
+      "system": {
+        "name": "Cable System 2",
+        "kind": "single_core",
+        "phase_spacing_mm": 42.0,
+        "identifier": "2166c5655cef4051bffb10d2cbeee239",
+        "nominal_current_a": 200,
+        "nominal_voltage_kv": 11.0,
+        "arrangement": "flat",
+        "single_core_phase": {
+          "name": "Phase",
+          "conductor": {
+            "area_mm2": 240.0,
+            "diameter_mm": 17.6,
+            "material": {
+              "name": "Copper",
+              "catalog": true
+            }
+          },
+          "layers": [
+            {
+              "role": "inner_screen",
+              "thickness_mm": 1.2,
+              "material": {
+                "name": "Semi-Conductive Compound",
+                "catalog": true
+              }
+            },
+            {
+              "role": "insulation",
+              "thickness_mm": 5.5,
+              "material": {
+                "name": "XLPE",
+                "catalog": true
+              }
+            },
+            {
+              "role": "outer_screen",
+              "thickness_mm": 1.2,
+              "material": {
+                "name": "Semi-Conductive Compound",
+                "catalog": true
+              }
+            },
+            {
+              "role": "sheath",
+              "thickness_mm": 2.5,
+              "material": {
+                "name": "PVC",
+                "catalog": true
+              }
+            },
+            {
+              "role": "serving",
+              "thickness_mm": 1.2,
+              "material": {
+                "name": "PE Serving",
+                "catalog": true
+              }
+            }
+          ],
+          "rated_voltage_kv": null
+        }
+      }
+    }
+  ]
+}

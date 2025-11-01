@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import math
+import uuid
 from typing import Dict, List, Optional, Sequence
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -103,10 +104,8 @@ class PlacementScene(QGraphicsScene):
         self._cable_count += 1
         system = self._build_default_single_core_system(self._cable_count)
         item = CableSystemItem(system)
-        self._systems[system.identifier] = item
         spawn_pos = position or self._default_cable_position()
-        self._spawn_item(item, spawn_pos)
-        return item
+        return self._spawn_item(item, spawn_pos)
 
     def remove_selected(self) -> None:
         removed = False
@@ -120,19 +119,56 @@ class PlacementScene(QGraphicsScene):
         if removed:
             self.mark_structure_changed()
 
-    def _spawn_item(self, item, position: Optional[QPointF]) -> None:
+    def _spawn_item(
+        self,
+        item,
+        position: Optional[QPointF],
+        *,
+        enforce_spacing: bool = True,
+    ) -> CableSystemItem:
         pos = position or QPointF(0.0, 0.0)
         item.setPos(pos)
         self.addItem(item)
         if isinstance(item, CableSystemItem):
             item.scene_config = self.config
-            best_pos = self._find_available_position(item, item.pos())
-            if best_pos != item.pos():
-                item.setPos(best_pos)
+            if enforce_spacing:
+                best_pos = self._find_available_position(item, item.pos())
+                if best_pos != item.pos():
+                    item.setPos(best_pos)
             self._systems[item.system.identifier] = item
         self.clearSelection()
         item.setSelected(True)
         self.invalidate()
+        self.mark_structure_changed()
+        return item
+
+    def add_system(
+        self,
+        system: CableSystem,
+        position: Optional[QPointF] = None,
+        *,
+        adjust_position: bool = False,
+    ) -> CableSystemItem:
+        if system.identifier in self._systems:
+            system.identifier = uuid.uuid4().hex
+        created = self._spawn_item(
+            CableSystemItem(system),
+            position,
+            enforce_spacing=adjust_position,
+        )
+        self._cable_count = max(self._cable_count, len(self._systems))
+        return created
+
+    def clear_systems(self) -> None:
+        if not self._systems:
+            return
+        for item in list(self._systems.values()):
+            self.removeItem(item)
+        self._systems.clear()
+        self._cable_count = 0
+        self.clearSelection()
+        self.invalidate()
+        self.update()
         self.mark_structure_changed()
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:  # type: ignore[override]

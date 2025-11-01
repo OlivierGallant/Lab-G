@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFrame,
     QFormLayout,
     QGroupBox,
     QHeaderView,
@@ -122,6 +123,7 @@ class CableSystemEditor(QWidget):
 
         self._scroll_area = QScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setFrameShape(QFrame.NoFrame)
         self._form_container = QWidget()
         self._scroll_area.setWidget(self._form_container)
         self._build_ui()

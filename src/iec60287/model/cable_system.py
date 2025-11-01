@@ -289,7 +289,7 @@ CONCRETE_DUCT = DuctMaterial(
 )
 EARTHENWARE_DUCT = DuctMaterial(
     name="Earthenware",
-    thermal_resistivity_k_m_per_w=2.0,
+    thermal_resistivity_k_m_per_w=1.2,
     notes="Traditional earthenware duct.",
     contact_defaults=EARTHENWARE_CONTACT,
 )

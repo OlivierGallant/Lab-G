@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDockWidget,
+    QFileDialog,
     QMessageBox,
     QMenu,
     QMainWindow,
@@ -23,6 +25,7 @@ from iec60287.gui.system_editor import CableSystemEditor
 from iec60287.gui.trench_designer import TrenchDesigner
 from iec60287.gui.ampacity_calculator import CableAmpacityCalculator
 from iec60287.gui.cable_fem import CableFEMPanel
+from iec60287.io import load_scene_configuration, save_scene_configuration
 
 
 class MainWindow(QMainWindow):
@@ -55,6 +58,13 @@ class MainWindow(QMainWindow):
         self._trench_dock = self._create_trench_dock()
         self._calculator_dock = self._create_calculator_dock()
         self._fem_dock = self._create_fem_dock()
+
+        self._save_layout_action = QAction("Save Layout\u2026", self)
+        self._save_layout_action.triggered.connect(self._handle_save_layout)
+        self._load_layout_action = QAction("Load Layout\u2026", self)
+        self._load_layout_action.triggered.connect(self._handle_load_layout)
+
+        self._last_config_path: Optional[Path] = None
 
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
@@ -118,9 +128,18 @@ class MainWindow(QMainWindow):
             "fit": fit_action,
             "fem_report": self._open_fem_report_action,
             "temp_overlay": overlay_action,
+            "save_layout": self._save_layout_action,
+            "load_layout": self._load_layout_action,
         }
 
     def _create_menus(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction(self._save_layout_action)
+        file_menu.addAction(self._load_layout_action)
+        file_menu.addSeparator()
+        exit_action = file_menu.addAction("Exit")
+        exit_action.triggered.connect(self.close)
+
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self._editor_dock.toggleViewAction())
         tools_menu.addAction(self._trench_dock.toggleViewAction())
@@ -129,6 +148,7 @@ class MainWindow(QMainWindow):
         calculations_menu.addAction(self._fem_dock.toggleViewAction())
         self.menuBar().addMenu(self._reports_menu)
         about_menu = self.menuBar().addMenu("&About")
+
     def _create_shortcuts(self) -> None:
         delete_shortcut = QShortcut(QKeySequence.Delete, self)
         delete_shortcut.activated.connect(self._handle_delete_selected)
@@ -140,22 +160,29 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("Cable System Editor", self)
         dock.setObjectName("CableSystemEditorDock")
         dock.setWidget(self._system_editor)
-        dock.setAllowedAreas(Qt.BottomDockWidgetArea)
-        dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
-        dock.setMinimumHeight(320)
-        dock.setMaximumHeight(420)
-        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
-        self.resizeDocks([dock], [360], Qt.Vertical)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(
+            QDockWidget.DockWidgetClosable
+            | QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+        )
+        dock.setMinimumWidth(320)
+        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self.resizeDocks([dock], [360], Qt.Horizontal)
         return dock
 
     def _create_trench_dock(self) -> QDockWidget:
         dock = QDockWidget("Trench Designer", self)
         dock.setObjectName("TrenchDesignerDock")
         dock.setWidget(self._trench_designer)
-        dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
-        dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
-        dock.setMinimumHeight(260)
-        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(
+            QDockWidget.DockWidgetClosable
+            | QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+        )
+        dock.setMinimumWidth(280)
+        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self.tabifyDockWidget(self._editor_dock, dock)
         dock.raise_()
         return dock
@@ -164,10 +191,14 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("Cable Ampacity Calculator", self)
         dock.setObjectName("CableAmpacityCalculatorDock")
         dock.setWidget(self._ampacity_calculator)
-        dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
-        dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
-        dock.setMinimumHeight(260)
-        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(
+            QDockWidget.DockWidgetClosable
+            | QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+        )
+        dock.setMinimumWidth(320)
+        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self.tabifyDockWidget(self._editor_dock, dock)
         return dock
 
@@ -175,10 +206,14 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("Cable FEM", self)
         dock.setObjectName("CableFEMDock")
         dock.setWidget(self._fem_panel)
-        dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
-        dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
-        dock.setMinimumHeight(260)
-        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(
+            QDockWidget.DockWidgetClosable
+            | QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+        )
+        dock.setMinimumWidth(320)
+        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self.tabifyDockWidget(self._calculator_dock, dock)
         return dock
 
@@ -209,6 +244,50 @@ class MainWindow(QMainWindow):
     def _fit_view(self) -> None:
         rect = self.scene.sceneRect()
         self.view.fitInView(rect, Qt.KeepAspectRatio)
+
+    def _handle_save_layout(self) -> None:
+        directory = str(self._last_config_path.parent) if self._last_config_path else ""
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Layout",
+            directory,
+            "Cable Layout (*.iec60287.json *.json);;JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.suffix:
+            path = path.with_suffix(".iec60287.json")
+        try:
+            save_scene_configuration(self.scene, path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save Layout", f"Unable to save layout:\n{exc}")
+            return
+        self._last_config_path = path
+        self._status_bar.showMessage(f"Layout saved to {path.name}", 4000)
+
+    def _handle_load_layout(self) -> None:
+        directory = str(self._last_config_path.parent) if self._last_config_path else ""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Layout",
+            directory,
+            "Cable Layout (*.iec60287.json *.json);;JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            load_scene_configuration(self.scene, path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Load Layout", f"Unable to load layout:\n{exc}")
+            return
+        self._last_config_path = path
+        self._handle_selection_changed()
+        self._refresh_calculators(force_fem=True)
+        self._fit_view()
+        self._last_structure_revision = self.scene.structure_revision()
+        self._status_bar.showMessage(f"Layout loaded from {path.name}", 4000)
 
     def _open_latest_fem_report(self) -> None:
         path = self._fem_panel.latest_heatmap_path()
