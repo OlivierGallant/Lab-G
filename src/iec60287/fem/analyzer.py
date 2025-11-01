@@ -100,6 +100,7 @@ class CableFemAnalyzer:
         loads: Sequence[CableLoad],
         *,
         ambient_temp_c: float,
+        surface_convection_w_per_m2k: float = 8.0,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> CableFemResult:
         if _IMPORT_ERROR is not None:
@@ -143,30 +144,38 @@ class CableFemAnalyzer:
         conductivity_field = DiscreteField(
             np.broadcast_to(tri_conductivity[:, None], (mesh_tri.t.shape[1], nqp))
         )
-        stiffness_full = asm(_diffusion_form, basis, k=conductivity_field).tocsr()
+        stiffness_matrix = asm(_diffusion_form, basis, k=conductivity_field).tocsr()
 
         total_nodes = nx * ny
-        boundary_nodes = _boundary_vertex_indices(nx, ny)
-        ambient_vector = np.full(boundary_nodes.size, ambient_temp_c, dtype=float)
-
-        internal_mask = np.ones(total_nodes, dtype=bool)
-        internal_mask[boundary_nodes] = False
-        internal_nodes = np.nonzero(internal_mask)[0]
-
-        if internal_nodes.size == 0:
-            raise ValueError("FEM mesh does not contain any interior nodes to solve for.")
-
-        stiffness_internal = stiffness_full[internal_nodes][:, internal_nodes].tocsr()
-        stiffness_ib = stiffness_full[internal_nodes][:, boundary_nodes].tocsr()
+        robin_load = np.zeros(total_nodes, dtype=float)
+        stiffness_matrix = stiffness_matrix.tolil()
+        if surface_convection_w_per_m2k > 0.0:
+            x_nodes_m = x_nodes_mm / 1000.0
+            convection = float(surface_convection_w_per_m2k)
+            for i in range(nx - 1):
+                edge_length = abs(x_nodes_m[i + 1] - x_nodes_m[i])
+                if edge_length <= 0.0:
+                    continue
+                node_left = i * ny
+                node_right = (i + 1) * ny
+                coeff = convection * edge_length / 6.0
+                stiffness_matrix[node_left, node_left] += 2.0 * coeff
+                stiffness_matrix[node_right, node_right] += 2.0 * coeff
+                stiffness_matrix[node_left, node_right] += coeff
+                stiffness_matrix[node_right, node_left] += coeff
+                load_increment = convection * ambient_temp_c * edge_length / 2.0
+                robin_load[node_left] += load_increment
+                robin_load[node_right] += load_increment
+        stiffness_matrix = stiffness_matrix.tocsr()
 
         direct_solver: Optional[Callable[[NDArray[np.float64]], NDArray[np.float64]]] = None
         if (
             self._prefer_direct
             and "factorized" in globals()
-            and stiffness_internal.shape[0] <= self._direct_threshold
+            and stiffness_matrix.shape[0] <= self._direct_threshold
         ):
             try:
-                factor = factorized(stiffness_internal.tocsc())
+                factor = factorized(stiffness_matrix.tocsc())
             except Exception:
                 factor = None
             if factor is not None:
@@ -175,16 +184,16 @@ class CableFemAnalyzer:
         preconditioner: Optional[LinearOperator] = None
         if direct_solver is None:
             try:
-                ilu = spilu(stiffness_internal.tocsc(), drop_tol=1e-3, fill_factor=6)
+                ilu = spilu(stiffness_matrix.tocsc(), drop_tol=1e-3, fill_factor=6)
             except Exception:  # pragma: no cover - preconditioner is optional
                 ilu = None
             if ilu is not None:
                 def _ilu_solve(vector: NDArray[np.float64]) -> NDArray[np.float64]:
                     return ilu.solve(vector)
                 preconditioner = LinearOperator(
-                    stiffness_internal.shape,
+                    stiffness_matrix.shape,
                     matvec=_ilu_solve,
-                    dtype=stiffness_internal.dtype,
+                    dtype=stiffness_matrix.dtype,
                 )
 
         prior_solution: Optional[NDArray[np.float64]] = None
@@ -214,11 +223,11 @@ class CableFemAnalyzer:
             heat_field = DiscreteField(
                 np.broadcast_to(tri_heat[:, None], (mesh_tri.t.shape[1], nqp))
             )
-            load_vector = asm(_heat_source_form, basis, q=heat_field)
-            rhs = load_vector[internal_nodes] - stiffness_ib.dot(ambient_vector)
+            load_vector = np.asarray(asm(_heat_source_form, basis, q=heat_field), dtype=float)
+            rhs = load_vector + robin_load
 
             if direct_solver is not None:
-                solution_internal = direct_solver(rhs)
+                solution = np.asarray(direct_solver(rhs), dtype=float)
                 info = 0
                 iterations_this = 1
                 solve_converged = True
@@ -241,11 +250,12 @@ class CableFemAnalyzer:
                 if preconditioner is not None:
                     cg_kwargs["M"] = preconditioner
 
-                solution_internal, info = cg(
-                    stiffness_internal,
+                solution, info = cg(
+                    stiffness_matrix,
                     rhs,
                     **cg_kwargs,
                 )
+                solution = np.asarray(solution, dtype=float)
 
                 if info < 0:
                     raise RuntimeError(f"Conjugate gradient solver failed with info={info}.")
@@ -257,12 +267,12 @@ class CableFemAnalyzer:
 
             solver_converged = solver_converged and solve_converged
             total_iterations += iterations_this
-            prior_solution = solution_internal
+            prior_solution = solution
 
-            full_solution = np.full(total_nodes, ambient_temp_c, dtype=float)
-            full_solution[internal_nodes] = solution_internal
-            temperatures_grid = full_solution.reshape((nx, ny)).T
+            if solution.size != total_nodes:
+                raise RuntimeError("Solver returned an unexpected solution vector length.")
 
+            temperatures_grid = solution.reshape((nx, ny)).T
             cable_temperatures = _summarise_cable_temperatures(
                 temperatures_grid.tolist(),
                 conductor_index,
@@ -358,24 +368,6 @@ def _build_triangular_mesh(
     if np.any(triangle_to_cell < 0) or np.any(triangle_to_cell >= num_cells):
         raise RuntimeError("Triangle-to-cell mapping produced invalid indices.")
     return mesh, triangle_to_cell
-
-
-def _boundary_vertex_indices(nx: int, ny: int) -> NDArray[np.int64]:
-    indices: set[int] = set()
-    last_x = nx - 1
-    last_y = ny - 1
-
-    # Left and right boundaries: x index 0 and last_x
-    for y in range(ny):
-        indices.add(y)  # x = 0
-        indices.add(last_x * ny + y)  # x = last_x
-
-    # Bottom and top boundaries: y index 0 and last_y
-    for x in range(nx):
-        indices.add(x * ny)  # y = 0
-        indices.add(x * ny + last_y)  # y = last_y
-
-    return np.array(sorted(indices), dtype=np.int64)
 
 
 class _IterationCounter:

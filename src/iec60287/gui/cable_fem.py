@@ -47,6 +47,7 @@ class FemWorker(QObject):
         loads: Sequence[CableLoad],
         *,
         ambient_temp_c: float,
+        surface_convection_w_per_m2k: float,
         max_iterations: int,
         tolerance_c: float,
     ) -> None:
@@ -54,6 +55,7 @@ class FemWorker(QObject):
         self._mesh_output = mesh_output
         self._loads = list(loads)
         self._ambient_temp_c = ambient_temp_c
+        self._surface_convection = max(surface_convection_w_per_m2k, 0.0)
         self._max_iterations = max_iterations
         self._tolerance_c = tolerance_c
 
@@ -68,6 +70,7 @@ class FemWorker(QObject):
                 self._mesh_output.mesh,
                 self._loads,
                 ambient_temp_c=self._ambient_temp_c,
+                surface_convection_w_per_m2k=self._surface_convection,
                 progress_callback=self._handle_progress,
             )
         except Exception as exc:  # noqa: BLE001
@@ -110,6 +113,7 @@ class CableFEMPanel(QWidget):
         self._padding_spin = QDoubleSpinBox(self)
         self._max_iterations_spin = QSpinBox(self)
         self._tolerance_spin = QDoubleSpinBox(self)
+        self._surface_convection_spin = QDoubleSpinBox(self)
 
         self._cable_table = QTableWidget(self)
         self._result_table = QTableWidget(self)
@@ -165,6 +169,12 @@ class CableFEMPanel(QWidget):
         self._ambient_spin.setSuffix(" °C")
         self._ambient_spin.setValue(20.0)
 
+        self._surface_convection_spin.setRange(0.1, 500.0)
+        self._surface_convection_spin.setDecimals(2)
+        self._surface_convection_spin.setSingleStep(0.5)
+        self._surface_convection_spin.setSuffix(" W/(m^2*K)")
+        self._surface_convection_spin.setValue(8.0)
+
         self._soil_resistivity_spin.setRange(0.05, 6.0)
         self._soil_resistivity_spin.setDecimals(3)
         self._soil_resistivity_spin.setSingleStep(0.05)
@@ -190,6 +200,7 @@ class CableFEMPanel(QWidget):
         self._tolerance_spin.setValue(0.001)
 
         form.addRow("Ambient temperature", self._ambient_spin)
+        form.addRow("Surface convection h", self._surface_convection_spin)
         form.addRow("Soil thermal ρ", self._soil_resistivity_spin)
         form.addRow("Grid spacing", self._grid_step_spin)
         form.addRow("Domain padding", self._padding_spin)
@@ -385,6 +396,7 @@ class CableFEMPanel(QWidget):
             mesh_output,
             loads,
             ambient_temp_c=self._ambient_spin.value(),
+            surface_convection_w_per_m2k=self._surface_convection_spin.value(),
             max_iterations=self._max_iterations_spin.value(),
             tolerance_c=self._tolerance_spin.value(),
         )
