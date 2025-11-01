@@ -475,7 +475,7 @@ class CableSystemEditor(QWidget):
             self._name_edit.clear()
             self._phase_spacing_spin.setValue(1.0)
             self._nominal_voltage_spin.setValue(0.0)
-            self._operating_current_spin.setValue(0.0)
+            self._operating_current_spin.setValue(350)
             self._reset_conductor_controls()
             self._reset_duct_controls()
             for control in self._layer_controls.values():

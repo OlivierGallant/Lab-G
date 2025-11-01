@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Sequence
 
 from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -50,6 +51,7 @@ class FemWorker(QObject):
         surface_convection_w_per_m2k: float,
         max_iterations: int,
         tolerance_c: float,
+        simplified_constant_rho: bool,
     ) -> None:
         super().__init__()
         self._mesh_output = mesh_output
@@ -58,6 +60,7 @@ class FemWorker(QObject):
         self._surface_convection = max(surface_convection_w_per_m2k, 0.0)
         self._max_iterations = max_iterations
         self._tolerance_c = tolerance_c
+        self._simplified_constant_rho = simplified_constant_rho
 
     @Slot()
     def run(self) -> None:
@@ -72,6 +75,7 @@ class FemWorker(QObject):
                 ambient_temp_c=self._ambient_temp_c,
                 surface_convection_w_per_m2k=self._surface_convection,
                 progress_callback=self._handle_progress,
+                simplified_constant_rho=self._simplified_constant_rho,
             )
         except Exception as exc:  # noqa: BLE001
             self.error.emit(str(exc))
@@ -115,6 +119,7 @@ class CableFEMPanel(QWidget):
         self._tolerance_spin = QDoubleSpinBox(self)
         self._surface_convection_spin = QDoubleSpinBox(self)
         self._growth_ratio_spin = QDoubleSpinBox(self)
+        self._simplified_checkbox = QCheckBox("Simplified FEM (constant ρ @ 90°C)", self)
 
         self._cable_table = QTableWidget(self)
         self._result_table = QTableWidget(self)
@@ -132,6 +137,7 @@ class CableFEMPanel(QWidget):
         self._report_root = Path.cwd() / "fem_reports"
         self._latest_report: Optional[ReportPaths] = None
         self._report_root.mkdir(parents=True, exist_ok=True)
+        self._simplified_last_run = False
 
         self._build_ui()
         self._wire_signals()
@@ -213,6 +219,7 @@ class CableFEMPanel(QWidget):
         form.addRow("Spacing growth ratio", self._growth_ratio_spin)
         form.addRow("Max iterations", self._max_iterations_spin)
         form.addRow("Convergence tolerance", self._tolerance_spin)
+        form.addRow("Solver mode", self._simplified_checkbox)
         return group
 
     def _build_cable_group(self) -> QGroupBox:
@@ -377,6 +384,7 @@ class CableFEMPanel(QWidget):
 
         definition_lookup = {cable.label: cable for cable in mesh_output.cables}
         loads: List[CableLoad] = []
+        simplified = self._simplified_checkbox.isChecked()
         for entry in self._entries:
             definition = definition_lookup.get(entry.label)
             if not definition:
@@ -385,7 +393,7 @@ class CableFEMPanel(QWidget):
                 CableLoad(
                     definition=definition,
                     heat_w_per_m=max(entry.heat_w_per_m, 0.0),
-                    auto_update=entry.auto_heat,
+                    auto_update=entry.auto_heat and not simplified,
                 )
             )
 
@@ -394,11 +402,15 @@ class CableFEMPanel(QWidget):
             return
 
         self._pending_loads = loads
+        self._simplified_last_run = simplified
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
         self._run_button.setEnabled(False)
         self._refresh_button.setEnabled(False)
-        self._status_label.setText("Running FEM analysis...")
+        status_msg = "Running FEM analysis..."
+        if simplified:
+            status_msg += " (simplified constant ρ)"
+        self._status_label.setText(status_msg)
 
         self._worker_thread = QThread(self)
         self._worker = FemWorker(
@@ -408,6 +420,7 @@ class CableFEMPanel(QWidget):
             surface_convection_w_per_m2k=self._surface_convection_spin.value(),
             max_iterations=self._max_iterations_spin.value(),
             tolerance_c=self._tolerance_spin.value(),
+            simplified_constant_rho=simplified,
         )
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
@@ -426,9 +439,10 @@ class CableFEMPanel(QWidget):
             self._set_result_item(row, 1, f"{temp.max_temp_c:.2f}")
             self._set_result_item(row, 2, f"{temp.average_temp_c:.2f}")
 
+        mode_note = " (simplified constant ρ)" if self._simplified_last_run else ""
         info = (
             f"Iterations: {result.iterations} ({'converged' if result.converged else 'max iterations reached'}). "
-            f"Field min/max: {result.min_temp_c:.2f}°C / {result.max_temp_c:.2f}°C."
+            f"Field min/max: {result.min_temp_c:.2f}°C / {result.max_temp_c:.2f}°C{mode_note}."
         )
         flux_info = (
             f" Flux W/m → top: {result.top_flux_w_per_m:.2f}, "
@@ -444,7 +458,7 @@ class CableFEMPanel(QWidget):
         self._result_table.setItem(row, column, item)
 
     def _apply_solver_heat_updates(self, result: CableFemResult, loads: Sequence[CableLoad]) -> None:
-        if not loads:
+        if not loads or self._simplified_last_run:
             return
         heat_map = {
             load.definition.label: heat
@@ -477,6 +491,11 @@ class CableFEMPanel(QWidget):
         self._refresh_button.setEnabled(True)
         self._populate_results(result)
         self._apply_solver_heat_updates(result, loads)
+        self._scene.set_temperature_overlay(
+            result.grid_x_mm,
+            result.grid_y_mm,
+            result.temperatures_c,
+        )
 
         report_msg = ""
         if self._mesh_output is not None:
@@ -500,6 +519,7 @@ class CableFEMPanel(QWidget):
         self._run_button.setEnabled(True)
         self._refresh_button.setEnabled(True)
         self._latest_report = None
+        self._scene.clear_temperature_overlay()
         QMessageBox.critical(self, "Cable FEM", message)
 
     def _on_worker_thread_finished(self) -> None:

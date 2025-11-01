@@ -55,6 +55,15 @@ class BaseGraphicsItem(QGraphicsObject):
         pen.setCosmetic(True)
         return pen
 
+    def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
+        result = super().itemChange(change, value)
+        if change == QGraphicsItem.ItemPositionHasChanged:
+            scene = self.scene()
+            mark = getattr(scene, "mark_structure_changed", None)
+            if callable(mark):
+                mark()
+        return result
+
 
 class CableItem(BaseGraphicsItem):
     """Circular item representing a single cable or phase."""
@@ -141,6 +150,10 @@ class CableSystemItem(BaseGraphicsItem):
         self._update_geometry_cache()
         self.ensure_valid_position()
         self.update()
+        scene = self.scene()
+        mark = getattr(scene, "mark_structure_changed", None)
+        if callable(mark):
+            mark()
 
     def boundingRect(self) -> QRectF:  # type: ignore[override]
         return QRectF(self._cached_rect)

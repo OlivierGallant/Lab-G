@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+import math
+from typing import Dict, List, Optional, Sequence
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QGraphicsScene
 
@@ -62,8 +63,25 @@ class SceneConfig:
     layers: List[TrenchLayer] = field(default_factory=default_trench_layers)
 
 
+@dataclass
+class TemperatureOverlayCell:
+    rect: QRectF
+    colour: QColor
+
+
+@dataclass
+class TemperatureOverlay:
+    cells: List[TemperatureOverlayCell]
+    bounds: QRectF
+    min_temp_c: float
+    max_temp_c: float
+
+
 class PlacementScene(QGraphicsScene):
     """Scene hosting draggable cable and backfill items."""
+
+    temperatureOverlayAvailableChanged = Signal(bool)
+    temperatureOverlayUpdated = Signal()
 
     def __init__(self, config: Optional[SceneConfig] = None) -> None:
         self.config = config or SceneConfig()
@@ -75,6 +93,11 @@ class PlacementScene(QGraphicsScene):
         self._cable_count = 0
         self._backfill_count = 0
         self._systems: Dict[str, CableSystemItem] = {}
+        self._temperature_overlay: Optional[TemperatureOverlay] = None
+        self._temperature_overlay_visible = False
+        self._overlay_change_guard = 0
+        self._structure_revision = 0
+        self.temperatureOverlayAvailableChanged.emit(False)
 
     def add_cable(self, position: Optional[QPointF] = None) -> CableSystemItem:
         self._cable_count += 1
@@ -86,11 +109,16 @@ class PlacementScene(QGraphicsScene):
         return item
 
     def remove_selected(self) -> None:
+        removed = False
         for item in list(self.selectedItems()):
             if isinstance(item, CableSystemItem):
                 self._systems.pop(item.system.identifier, None)
+                removed = True
             self.removeItem(item)
+            removed = True
         self.invalidate()
+        if removed:
+            self.mark_structure_changed()
 
     def _spawn_item(self, item, position: Optional[QPointF]) -> None:
         pos = position or QPointF(0.0, 0.0)
@@ -105,6 +133,7 @@ class PlacementScene(QGraphicsScene):
         self.clearSelection()
         item.setSelected(True)
         self.invalidate()
+        self.mark_structure_changed()
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:  # type: ignore[override]
         painter.fillRect(rect, self.config.background_colour)
@@ -129,6 +158,39 @@ class PlacementScene(QGraphicsScene):
 
         draw_grid(self.config.minor_grid, self.config.minor_grid_colour)
         draw_grid(self.config.major_grid, self.config.major_grid_colour)
+
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # type: ignore[override]
+        super().drawForeground(painter, rect)
+        if not self._temperature_overlay_visible or not self._temperature_overlay:
+            return
+        overlay = self._temperature_overlay
+        if overlay.bounds.isNull():
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setPen(Qt.NoPen)
+        for cell in overlay.cells:
+            painter.setBrush(cell.colour)
+            painter.drawRect(cell.rect)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        label = f"{overlay.min_temp_c:.1f}°C – {overlay.max_temp_c:.1f}°C"
+        metrics = painter.fontMetrics()
+        padding = 4
+        text_width = metrics.horizontalAdvance(label)
+        text_height = metrics.height()
+        box = QRectF(
+            overlay.bounds.left() + 8,
+            overlay.bounds.top() + 8,
+            text_width + padding * 2,
+            text_height + padding * 2,
+        )
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 160))
+        painter.drawRoundedRect(box, 4.0, 4.0)
+        painter.setPen(Qt.white)
+        painter.drawText(box.adjusted(padding, padding, -padding, -padding), Qt.AlignCenter, label)
+        painter.restore()
 
     def systems(self) -> List[CableSystem]:
         """Return the cable system data present in the scene."""
@@ -156,6 +218,81 @@ class PlacementScene(QGraphicsScene):
         self.config.layers = list(layers)
         self.refresh_after_config_change()
 
+    def structure_revision(self) -> int:
+        return self._structure_revision
+
+    def mark_structure_changed(self) -> None:
+        self._structure_revision += 1
+
+    def has_temperature_overlay(self) -> bool:
+        return self._temperature_overlay is not None
+
+    def set_temperature_overlay_visible(self, visible: bool) -> None:
+        if visible and self._temperature_overlay is None:
+            return
+        if self._temperature_overlay_visible == visible:
+            return
+        self._temperature_overlay_visible = visible
+        overlay = self._temperature_overlay
+        if overlay:
+            self._mark_overlay_refresh()
+            self.invalidate(overlay.bounds)
+        self.update()
+
+    def is_temperature_overlay_visible(self) -> bool:
+        return self._temperature_overlay_visible and self._temperature_overlay is not None
+
+    def set_temperature_overlay(
+        self,
+        x_nodes_mm: Sequence[float],
+        y_nodes_mm: Sequence[float],
+        temperatures_c: Sequence[Sequence[float]],
+    ) -> None:
+        overlay = self._build_temperature_overlay(x_nodes_mm, y_nodes_mm, temperatures_c)
+        if overlay is None:
+            self.clear_temperature_overlay()
+            return
+        was_available = self._temperature_overlay is not None
+        self._mark_overlay_refresh()
+        self._temperature_overlay = overlay
+        if not was_available:
+            self.temperatureOverlayAvailableChanged.emit(True)
+        self.temperatureOverlayUpdated.emit()
+        if self._temperature_overlay_visible:
+            self.invalidate(overlay.bounds)
+        self.update()
+
+    def clear_temperature_overlay(self) -> None:
+        if self._temperature_overlay is None and not self._temperature_overlay_visible:
+            return
+        overlay_rect = (
+            self._temperature_overlay.bounds if self._temperature_overlay else QRectF(self.sceneRect())
+        )
+        was_available = self._temperature_overlay is not None
+        self._temperature_overlay = None
+        was_visible = self._temperature_overlay_visible
+        self._temperature_overlay_visible = False
+        self._overlay_change_guard = 0
+        if was_available:
+            self.temperatureOverlayAvailableChanged.emit(False)
+        if was_visible:
+            self.invalidate(overlay_rect)
+        self.update()
+
+    def temperature_overlay_bounds(self) -> Optional[QRectF]:
+        if not self._temperature_overlay:
+            return None
+        return QRectF(self._temperature_overlay.bounds)
+
+    def consume_overlay_change_guard(self) -> bool:
+        if self._overlay_change_guard > 0:
+            self._overlay_change_guard -= 1
+            return True
+        return False
+
+    def _mark_overlay_refresh(self) -> None:
+        self._overlay_change_guard = max(self._overlay_change_guard, 2)
+
     def refresh_after_config_change(self) -> None:
         for item in self._systems.values():
             item.scene_config = self.config
@@ -163,6 +300,7 @@ class PlacementScene(QGraphicsScene):
             item.update()
         self.invalidate()
         self.update()
+        self.mark_structure_changed()
 
     def _default_cable_position(self) -> QPointF:
         y = self.config.surface_level_y + self.config.trench_depth_mm * 0.5
@@ -251,6 +389,100 @@ class PlacementScene(QGraphicsScene):
         painter.setPen(surface_pen)
         painter.drawLine(trench_rect.left() - width * 0.2, surface_y, trench_rect.right() + width * 0.2, surface_y)
         painter.restore()
+
+    def _build_temperature_overlay(
+        self,
+        x_nodes_mm: Sequence[float],
+        y_nodes_mm: Sequence[float],
+        temperatures_c: Sequence[Sequence[float]],
+    ) -> Optional[TemperatureOverlay]:
+        if len(x_nodes_mm) < 2 or len(y_nodes_mm) < 2:
+            return None
+
+        columns = len(x_nodes_mm) - 1
+        rows = len(y_nodes_mm) - 1
+        if columns <= 0 or rows <= 0:
+            return None
+
+        temp_rows: List[List[float]] = []
+        for row in temperatures_c:
+            row_values: List[float] = []
+            for value in row:
+                try:
+                    row_values.append(float(value))
+                except (TypeError, ValueError):
+                    row_values.append(float("nan"))
+            temp_rows.append(row_values)
+
+        if len(temp_rows) != len(y_nodes_mm):
+            return None
+        if any(len(row) != len(x_nodes_mm) for row in temp_rows):
+            return None
+
+        finite_values = [value for row in temp_rows for value in row if math.isfinite(value)]
+        if not finite_values:
+            return None
+
+        min_temp = min(finite_values)
+        max_temp = max(finite_values)
+        reference_value = finite_values[0]
+
+        cells: List[TemperatureOverlayCell] = []
+
+        for j in range(rows):
+            top_row = temp_rows[j]
+            bottom_row = temp_rows[j + 1]
+            y0 = float(y_nodes_mm[j])
+            y1 = float(y_nodes_mm[j + 1])
+            if not math.isfinite(y0) or not math.isfinite(y1):
+                continue
+            if math.isclose(y0, y1):
+                continue
+            top = min(y0, y1)
+            height = abs(y1 - y0)
+            for i in range(columns):
+                x0 = float(x_nodes_mm[i])
+                x1 = float(x_nodes_mm[i + 1])
+                if not math.isfinite(x0) or not math.isfinite(x1):
+                    continue
+                if math.isclose(x0, x1):
+                    continue
+                left = min(x0, x1)
+                width = abs(x1 - x0)
+                samples = [
+                    top_row[i],
+                    top_row[i + 1],
+                    bottom_row[i],
+                    bottom_row[i + 1],
+                ]
+                valid_samples = [value for value in samples if math.isfinite(value)]
+                if valid_samples:
+                    average = sum(valid_samples) / len(valid_samples)
+                else:
+                    average = reference_value
+                colour = self._temperature_to_colour(average, min_temp, max_temp)
+                cells.append(TemperatureOverlayCell(rect=QRectF(left, top, width, height), colour=colour))
+
+        if not cells:
+            return None
+
+        min_x = min(cell.rect.left() for cell in cells)
+        min_y = min(cell.rect.top() for cell in cells)
+        max_x = max(cell.rect.right() for cell in cells)
+        max_y = max(cell.rect.bottom() for cell in cells)
+        bounds = QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
+        return TemperatureOverlay(cells=cells, bounds=bounds, min_temp_c=min_temp, max_temp_c=max_temp)
+
+    def _temperature_to_colour(self, value: float, minimum: float, maximum: float) -> QColor:
+        span = maximum - minimum
+        if span <= 1e-6:
+            t = 0.5
+        else:
+            t = (value - minimum) / span
+        t = max(0.0, min(1.0, t))
+        hue = (240.0 - 240.0 * t) / 360.0
+        hue = max(0.0, min(1.0, hue))
+        return QColor.fromHsvF(hue, 1.0, 1.0, 0.6)
 
     def _find_available_position(self, item: CableSystemItem, start: QPointF) -> QPointF:
         if item.position_is_allowed(start):

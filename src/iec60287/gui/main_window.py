@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, Qt, QUrl
+from typing import List, Optional
+
+from PySide6.QtCore import QPointF, QRectF, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDockWidget,
@@ -58,6 +60,9 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._status_bar)
 
         self._create_toolbar()
+        self.scene.temperatureOverlayAvailableChanged.connect(self._handle_overlay_available_changed)
+        self._handle_overlay_available_changed(self.scene.has_temperature_overlay())
+        self._last_structure_revision = self.scene.structure_revision()
         self._create_menus()
         self._create_shortcuts()
         self._seed_scene()
@@ -98,11 +103,21 @@ class MainWindow(QMainWindow):
         reports_button.setMenu(self._reports_menu)
         toolbar.addWidget(reports_button)
 
+        toolbar.addSeparator()
+
+        overlay_action = QAction("Temp Overlay", self)
+        overlay_action.setCheckable(True)
+        overlay_action.setEnabled(False)
+        overlay_action.toggled.connect(self._handle_overlay_toggled)
+        toolbar.addAction(overlay_action)
+        self._overlay_action = overlay_action
+
         self._actions = {
             "add_cable": add_cable_action,
             "delete": delete_action,
             "fit": fit_action,
             "fem_report": self._open_fem_report_action,
+            "temp_overlay": overlay_action,
         }
 
     def _create_menus(self) -> None:
@@ -218,6 +233,21 @@ class MainWindow(QMainWindow):
                 "Unable to open the FEM heatmap with the system viewer.",
             )
 
+    def _handle_overlay_toggled(self, checked: bool) -> None:
+        if checked and not self.scene.has_temperature_overlay():
+            self._overlay_action.blockSignals(True)
+            self._overlay_action.setChecked(False)
+            self._overlay_action.blockSignals(False)
+            return
+        self.scene.set_temperature_overlay_visible(checked)
+
+    def _handle_overlay_available_changed(self, available: bool) -> None:
+        self._overlay_action.setEnabled(available)
+        if not available and self._overlay_action.isChecked():
+            self._overlay_action.blockSignals(True)
+            self._overlay_action.setChecked(False)
+            self._overlay_action.blockSignals(False)
+
     def _update_status(self) -> None:
         item_count = len(self.scene.items())
         selected = len(self.scene.selectedItems())
@@ -236,8 +266,18 @@ class MainWindow(QMainWindow):
         self._refresh_calculators()
         self._update_status()
 
-    def _handle_scene_changed(self, *_) -> None:
+    def _handle_scene_changed(self, _regions: Optional[List[QRectF]] = None) -> None:
+        if hasattr(self.scene, "consume_overlay_change_guard") and self.scene.consume_overlay_change_guard():
+            return
+        current_revision = self.scene.structure_revision()
+        if current_revision == self._last_structure_revision:
+            return
+        self._last_structure_revision = current_revision
+        if self.scene.has_temperature_overlay():
+            self.scene.clear_temperature_overlay()
         self._refresh_calculators()
+        self._update_status()
+
 
     def _refresh_calculators(self, *, force_fem: bool = False) -> None:
         self._ampacity_calculator.refresh_from_scene()

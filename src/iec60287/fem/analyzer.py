@@ -105,6 +105,7 @@ class CableFemAnalyzer:
         ambient_temp_c: float,
         surface_convection_w_per_m2k: float = 8.0,
         progress_callback: Optional[Callable[[float], None]] = None,
+        simplified_constant_rho: bool = False,
     ) -> CableFemResult:
         if _IMPORT_ERROR is not None:
             raise ModuleNotFoundError(
@@ -208,7 +209,7 @@ class CableFemAnalyzer:
         temperatures_grid = np.full((ny, nx), ambient_temp_c, dtype=float)
         cable_temperatures: Sequence[CableTemperature] = ()
 
-        total_outer = max(self._max_outer_iterations, 1)
+        total_outer = 1 if simplified_constant_rho else max(self._max_outer_iterations, 1)
         if progress_callback:
             progress_callback(0.0)
 
@@ -284,16 +285,18 @@ class CableFemAnalyzer:
                 [load.definition for load in loads],
             )
 
-            updated = _update_heat_values(
-                heat_values,
-                loads,
-                cable_temperatures,
-                self._heat_tolerance,
-            )
+            updated = False
+            if not simplified_constant_rho:
+                updated = _update_heat_values(
+                    heat_values,
+                    loads,
+                    cable_temperatures,
+                    self._heat_tolerance,
+                )
             if progress_callback:
                 progress_callback((outer_index + 1) / total_outer)
 
-            if not updated:
+            if simplified_constant_rho or not updated:
                 outer_converged = True
                 break
 
