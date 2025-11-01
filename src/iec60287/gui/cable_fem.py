@@ -203,8 +203,8 @@ class CableFEMPanel(QWidget):
         self._growth_ratio_spin.setSingleStep(0.05)
         self._growth_ratio_spin.setValue(0.50)
 
-        self._max_iterations_spin.setRange(100, 20000)
-        self._max_iterations_spin.setValue(5000)
+        self._max_iterations_spin.setRange(1, 20000)
+        self._max_iterations_spin.setValue(1)
 
         self._tolerance_spin.setRange(1e-5, 1.0)
         self._tolerance_spin.setDecimals(5)

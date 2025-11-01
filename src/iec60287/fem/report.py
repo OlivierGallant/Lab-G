@@ -150,7 +150,7 @@ def _write_heatmap(
             radius=cable.overall_radius_mm,
             edgecolor="#00c6ff",
             facecolor="none",
-            linewidth=1.0,
+            linewidth=0.2,
             label=label,
         )
         axis.add_patch(circle)

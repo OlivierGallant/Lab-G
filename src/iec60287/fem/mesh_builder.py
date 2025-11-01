@@ -19,6 +19,7 @@ from iec60287.model import (
 _DEFAULT_LAYER_RESISTIVITY = 1.0
 _MIN_RESISTIVITY = 1e-5
 _AIR_GAP_RESISTIVITY = 25.0
+_MAX_DOMAIN_EXTRA_MM = 6000.0
 
 
 @dataclass
@@ -372,31 +373,37 @@ def _build_domain(
         cable_max_x = max(c.centre_x_mm + c.overall_radius_mm for c in cables)
         max_radius = max((c.overall_radius_mm for c in cables), default=0.0)
         lateral_margin = max(padding_mm, 10.0 * max_radius)
+        span_x = max(cable_max_x - cable_min_x, grid_step_mm)
+        target_width = max(
+            span_x + 2.0 * lateral_margin,
+            scene.config.trench_width_mm + 2.0 * padding_mm,
+        )
+        max_width = scene.config.trench_width_mm + 2.0 * padding_mm + _MAX_DOMAIN_EXTRA_MM
+        target_width = min(target_width, max_width)
 
-        min_x = cable_min_x - lateral_margin
-        max_x = cable_max_x + lateral_margin
+        centre_x = 0.5 * (cable_min_x + cable_max_x)
+        half_width = 0.5 * target_width
+        min_x = centre_x - half_width
+        max_x = centre_x + half_width
+
         min_x = min(min_x, -half_trench_width - padding_mm)
         max_x = max(max_x, half_trench_width + padding_mm)
 
         vertical_margin = max(padding_mm, 10.0 * max_radius)
         cable_bottom = max(c.centre_y_mm + vertical_margin for c in cables)
-        domain_width = max(max_x - min_x, grid_step_mm * 4.0)
-        trench_span = scene.config.trench_width_mm + 2.0 * padding_mm
         target_depth = max(
             scene.config.trench_depth_mm + padding_mm,
-            trench_span,
-            domain_width,
+            cable_bottom - surface_y,
         )
+        max_depth = scene.config.trench_depth_mm + padding_mm + _MAX_DOMAIN_EXTRA_MM
+        target_depth = min(target_depth, max_depth)
         min_y = surface_y
-        max_y = max(cable_bottom, surface_y + target_depth)
+        max_y = surface_y + target_depth
     else:
         min_x = -half_trench_width - padding_mm
         max_x = half_trench_width + padding_mm
         min_y = surface_y
-        max_y = surface_y + max(
-            trench_depth + padding_mm,
-            scene.config.trench_width_mm + 2.0 * padding_mm,
-        )
+        max_y = surface_y + trench_depth + padding_mm
 
     gap_limit = _minimum_gap_spacing(cables)
     growth = 1.2

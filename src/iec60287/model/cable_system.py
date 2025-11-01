@@ -328,7 +328,7 @@ class CableSystem:
     arrangement: Optional[SingleCoreArrangement] = None
     single_core_phase: Optional[CablePhase] = None
     multicore: Optional[MultiCoreCable] = None
-    nominal_current_a: Optional[float] = None
+    nominal_current_a: Optional[float] = 200
     nominal_voltage_kv: Optional[float] = None
     duct: Optional[DuctSpecification] = None
 

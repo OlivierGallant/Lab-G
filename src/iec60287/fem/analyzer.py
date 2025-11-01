@@ -26,7 +26,7 @@ try:  # pragma: no cover - import guard exercised at runtime
         asm,
     )
     from skfem.helpers import dot, grad
-    from scipy.sparse.linalg import LinearOperator, cg, factorized, spilu
+    from scipy.sparse.linalg import LinearOperator, cg, factorized, spilu, splu, spsolve
 except ModuleNotFoundError as exc:  # pragma: no cover - lazily reported during solve()
     _IMPORT_ERROR: Optional[ModuleNotFoundError] = exc
 else:
@@ -174,6 +174,8 @@ class CableFemAnalyzer:
         else:
             stiffness_matrix = stiffness_matrix.tocsr()
 
+        stiffness_csc = stiffness_matrix.tocsc()
+
         direct_solver: Optional[Callable[[NDArray[np.float64]], NDArray[np.float64]]] = None
         if (
             self._prefer_direct
@@ -181,16 +183,30 @@ class CableFemAnalyzer:
             and stiffness_matrix.shape[0] <= self._direct_threshold
         ):
             try:
-                factor = factorized(stiffness_matrix.tocsc())
+                factor = factorized(stiffness_csc)
             except Exception:
                 factor = None
             if factor is not None:
                 direct_solver = factor
+            else:
+                try:
+                    lu = splu(stiffness_csc)
+                except Exception:
+                    lu = None
+                if lu is not None:
+                    def _lu_solve(vector: NDArray[np.float64]) -> NDArray[np.float64]:
+                        return lu.solve(vector)
+                    direct_solver = _lu_solve
+                else:
+                    if self._prefer_direct:
+                        def _spsolve_solver(vector: NDArray[np.float64]) -> NDArray[np.float64]:
+                            return spsolve(stiffness_csc, vector)
+                        direct_solver = _spsolve_solver
 
         preconditioner: Optional[LinearOperator] = None
         if direct_solver is None:
             try:
-                ilu = spilu(stiffness_matrix.tocsc(), drop_tol=1e-3, fill_factor=6)
+                ilu = spilu(stiffness_csc, drop_tol=1e-3, fill_factor=6)
             except Exception:  # pragma: no cover - preconditioner is optional
                 ilu = None
             if ilu is not None:
@@ -268,6 +284,15 @@ class CableFemAnalyzer:
 
                 solve_converged = info == 0
                 iterations_this = counter.count
+                if not solve_converged and stiffness_matrix.nnz and stiffness_matrix.shape[0]:
+                    # Fallback to a direct solve when CG stalls; guarantees progress
+                    solution = np.asarray(spsolve(stiffness_csc, rhs), dtype=float)
+                    solve_converged = True
+                    iterations_this = (
+                        counter.count
+                        if counter.count and counter.count < self._max_iterations
+                        else 1
+                    )
                 if iterations_this == 0:
                     iterations_this = 1 if solve_converged else self._max_iterations
 
