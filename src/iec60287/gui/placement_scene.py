@@ -43,7 +43,7 @@ def default_trench_layers() -> List[TrenchLayer]:
             name="Native Soil",
             kind=TrenchLayerKind.GROUND,
             thickness_mm=1200,
-            thermal_resistivity_k_m_per_w=1.25,
+            thermal_resistivity_k_m_per_w=1.5,
         ),
     ]
 
@@ -199,7 +199,7 @@ class PlacementScene(QGraphicsScene):
         return CableSystem(
             name=name,
             kind=CableSystemKind.SINGLE_CORE,
-            phase_spacing_mm=150.0,
+            phase_spacing_mm=42.0,
             arrangement=SingleCoreArrangement.FLAT,
             single_core_phase=phase,
             nominal_voltage_kv=11.0,

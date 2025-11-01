@@ -8,6 +8,7 @@ from typing import Dict, Optional, Sequence
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -28,6 +29,11 @@ from iec60287.model import (
     CableSystem,
     CableSystemKind,
     ConductorSpec,
+    DuctContactConstants,
+    DuctMaterial,
+    DuctOccupancy,
+    DuctSpecification,
+    STANDARD_DUCT_MATERIALS,
     LayerRole,
     LayerSpec,
     Material,
@@ -63,6 +69,20 @@ class ConductorControl:
     outer_diameter_label: QLabel
 
 
+@dataclass
+class DuctControls:
+    group: QGroupBox
+    enable: QCheckBox
+    material_combo: QComboBox
+    inner_diameter_spin: QDoubleSpinBox
+    wall_thickness_spin: QDoubleSpinBox
+    occupancy_combo: QComboBox
+    medium_temp_spin: QDoubleSpinBox
+    contact_u_spin: QDoubleSpinBox
+    contact_v_spin: QDoubleSpinBox
+    contact_y_spin: QDoubleSpinBox
+
+
 class CableSystemEditor(QWidget):
     """Form for editing properties of the selected cable system."""
 
@@ -94,6 +114,7 @@ class CableSystemEditor(QWidget):
         self._layers_table: Optional[QTableWidget] = None
         self._conductor_row_index: Optional[int] = None
         self._conductor_control: Optional[ConductorControl] = None
+        self._duct_controls: Optional[DuctControls] = None
 
         self._overall_diameter_label = QLabel("Overall outer diameter: — mm", self)
         self._overall_diameter_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -129,7 +150,6 @@ class CableSystemEditor(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.addWidget(self._placeholder)
         layout.addWidget(self._scroll_area)
-        layout.addStretch()
 
         form_layout = QVBoxLayout(self._form_container)
         form_layout.setContentsMargins(0, 0, 0, 0)
@@ -159,6 +179,8 @@ class CableSystemEditor(QWidget):
         self._operating_current_spin.setDecimals(1)
         self._operating_current_spin.setSuffix(" A")
         general_form.addRow("Operating current", self._operating_current_spin)
+
+        self._duct_controls = self._build_duct_group(self._form_container)
 
         layers_group = QGroupBox("Radial layers", self._form_container)
         layers_layout = QVBoxLayout(layers_group)
@@ -210,6 +232,8 @@ class CableSystemEditor(QWidget):
             self._add_layer_row(*definition)
 
         form_layout.addWidget(general_group)
+        if self._duct_controls:
+            form_layout.addWidget(self._duct_controls.group)
         form_layout.addWidget(layers_group)
         form_layout.addStretch()
 
@@ -292,12 +316,141 @@ class CableSystemEditor(QWidget):
         initial_enabled = enable_checkbox.isChecked() if enable_checkbox else True
         self._refresh_layer_enabled_state(control, initial_enabled)
 
+    def _build_duct_group(self, parent: QWidget) -> DuctControls:
+        group = QGroupBox("Duct / Pipe", parent)
+        form = QFormLayout(group)
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setFormAlignment(Qt.AlignLeft)
+        form.setSpacing(6)
+
+        enable_checkbox = QCheckBox("Cable installed inside a duct or pipe", group)
+        enable_checkbox.setChecked(False)
+        form.addRow(enable_checkbox)
+
+        material_combo = QComboBox(group)
+        material_combo.setMinimumWidth(150)
+        self._populate_duct_material_combo(material_combo)
+        form.addRow("Material", material_combo)
+
+        inner_spin = QDoubleSpinBox(group)
+        inner_spin.setRange(1.0, 5000.0)
+        inner_spin.setDecimals(1)
+        inner_spin.setSuffix(" mm")
+        inner_spin.setValue(100.0)
+        form.addRow("Inner diameter", inner_spin)
+
+        wall_spin = QDoubleSpinBox(group)
+        wall_spin.setRange(0.1, 500.0)
+        wall_spin.setDecimals(2)
+        wall_spin.setSuffix(" mm")
+        wall_spin.setValue(5.0)
+        form.addRow("Wall thickness", wall_spin)
+
+        occupancy_combo = QComboBox(group)
+        occupancy_combo.addItem("Single phase per duct", DuctOccupancy.SINGLE_PHASE_PER_DUCT)
+        occupancy_combo.addItem("Three phases per duct", DuctOccupancy.THREE_PHASES_PER_DUCT)
+        form.addRow("Occupancy", occupancy_combo)
+
+        medium_spin = QDoubleSpinBox(group)
+        medium_spin.setRange(-50.0, 150.0)
+        medium_spin.setDecimals(1)
+        medium_spin.setSuffix(" °C")
+        medium_spin.setValue(20.0)
+        form.addRow("Medium temperature", medium_spin)
+
+        contact_u_spin = QDoubleSpinBox(group)
+        contact_u_spin.setRange(0.001, 10.0)
+        contact_u_spin.setDecimals(4)
+        contact_u_spin.setSingleStep(0.001)
+        contact_u_spin.setReadOnly(True)
+        contact_u_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        form.addRow("Contact constant U", contact_u_spin)
+
+        contact_v_spin = QDoubleSpinBox(group)
+        contact_v_spin.setRange(0.0, 10.0)
+        contact_v_spin.setDecimals(3)
+        contact_v_spin.setSingleStep(0.01)
+        contact_v_spin.setReadOnly(True)
+        contact_v_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        form.addRow("Contact constant V", contact_v_spin)
+
+        contact_y_spin = QDoubleSpinBox(group)
+        contact_y_spin.setRange(0.0, 1.0)
+        contact_y_spin.setDecimals(4)
+        contact_y_spin.setSingleStep(0.001)
+        contact_y_spin.setReadOnly(True)
+        contact_y_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        form.addRow("Contact constant Y", contact_y_spin)
+
+        controls = DuctControls(
+            group=group,
+            enable=enable_checkbox,
+            material_combo=material_combo,
+            inner_diameter_spin=inner_spin,
+            wall_thickness_spin=wall_spin,
+            occupancy_combo=occupancy_combo,
+            medium_temp_spin=medium_spin,
+            contact_u_spin=contact_u_spin,
+            contact_v_spin=contact_v_spin,
+            contact_y_spin=contact_y_spin,
+        )
+        self._set_duct_fields_enabled(controls, False)
+        self._apply_duct_material_contact_defaults(controls)
+        return controls
+
+    def _populate_duct_material_combo(self, combo: QComboBox) -> None:
+        combo.clear()
+        for material in STANDARD_DUCT_MATERIALS:
+            combo.addItem(material.name, material)
+
+    def _set_duct_fields_enabled(self, controls: DuctControls, enabled: bool) -> None:
+        widgets = (
+            controls.material_combo,
+            controls.inner_diameter_spin,
+            controls.wall_thickness_spin,
+            controls.occupancy_combo,
+            controls.medium_temp_spin,
+            controls.contact_u_spin,
+            controls.contact_v_spin,
+            controls.contact_y_spin,
+        )
+        for widget in widgets:
+            widget.setEnabled(enabled)
+
+    def _apply_duct_material_contact_defaults(self, controls: DuctControls) -> None:
+        material = controls.material_combo.currentData()
+        if isinstance(material, DuctMaterial):
+            contact = material.contact_defaults
+        else:
+            contact = DuctContactConstants(u=0.086, v=0.60, y=0.0)
+        controls.contact_u_spin.blockSignals(True)
+        controls.contact_u_spin.setValue(contact.u)
+        controls.contact_u_spin.blockSignals(False)
+        controls.contact_v_spin.blockSignals(True)
+        controls.contact_v_spin.setValue(contact.v)
+        controls.contact_v_spin.blockSignals(False)
+        controls.contact_y_spin.blockSignals(True)
+        controls.contact_y_spin.setValue(contact.y)
+        controls.contact_y_spin.blockSignals(False)
+
     def _wire_signals(self) -> None:
         self._name_edit.editingFinished.connect(self._apply_general_changes)
         self._arrangement_combo.currentIndexChanged.connect(self._apply_general_changes)
         self._phase_spacing_spin.valueChanged.connect(self._apply_general_changes)
         self._nominal_voltage_spin.valueChanged.connect(self._apply_general_changes)
         self._operating_current_spin.valueChanged.connect(self._apply_general_changes)
+
+        if self._duct_controls:
+            dc = self._duct_controls
+            dc.enable.toggled.connect(self._handle_duct_enabled)
+            dc.material_combo.currentIndexChanged.connect(self._handle_duct_material_changed)
+            dc.inner_diameter_spin.valueChanged.connect(self._handle_duct_value_changed)
+            dc.wall_thickness_spin.valueChanged.connect(self._handle_duct_value_changed)
+            dc.occupancy_combo.currentIndexChanged.connect(self._handle_duct_value_changed)
+            dc.medium_temp_spin.valueChanged.connect(self._handle_duct_value_changed)
+            dc.contact_u_spin.valueChanged.connect(self._handle_duct_value_changed)
+            dc.contact_v_spin.valueChanged.connect(self._handle_duct_value_changed)
+            dc.contact_y_spin.valueChanged.connect(self._handle_duct_value_changed)
 
         if self._conductor_control:
             cc = self._conductor_control
@@ -324,6 +477,7 @@ class CableSystemEditor(QWidget):
             self._nominal_voltage_spin.setValue(0.0)
             self._operating_current_spin.setValue(0.0)
             self._reset_conductor_controls()
+            self._reset_duct_controls()
             for control in self._layer_controls.values():
                 if control.enable:
                     control.enable.blockSignals(True)
@@ -359,6 +513,8 @@ class CableSystemEditor(QWidget):
         self._phase_spacing_spin.setValue(max(system.phase_spacing_mm, 1.0))
         self._nominal_voltage_spin.setValue(system.nominal_voltage_kv or 0.0)
         self._operating_current_spin.setValue(system.nominal_current_a or 0.0)
+
+        self._apply_duct_from_system(system)
 
         phase = self._single_core_phase(system)
         if phase:
@@ -454,6 +610,15 @@ class CableSystemEditor(QWidget):
                 combo.setCurrentIndex(0)
         combo.blockSignals(False)
 
+    def _set_combo_to_duct_material(self, combo: QComboBox, material: DuctMaterial) -> None:
+        for index in range(combo.count()):
+            candidate = combo.itemData(index)
+            if isinstance(candidate, DuctMaterial) and candidate.name == material.name:
+                combo.setCurrentIndex(index)
+                return
+        if combo.count() > 0:
+            combo.setCurrentIndex(0)
+
     def _apply_layer_material(self, control: LayerControl) -> None:
         material_data = control.material_combo.currentData()
         if isinstance(material_data, Material):
@@ -501,7 +666,82 @@ class CableSystemEditor(QWidget):
         current = self._operating_current_spin.value()
         system.nominal_current_a = current or None
 
+        self._sync_duct_spec()
         self._current_item.update_system(system)
+
+    def _handle_duct_enabled(self, checked: bool) -> None:
+        if not self._duct_controls:
+            return
+        self._set_duct_fields_enabled(self._duct_controls, checked)
+        if checked:
+            self._apply_duct_material_contact_defaults(self._duct_controls)
+        if self._updating:
+            return
+        if self._sync_duct_spec():
+            self._current_item.update_system(self._current_item.system)
+
+    def _handle_duct_material_changed(self, _index: int) -> None:
+        if not self._duct_controls:
+            return
+        self._apply_duct_material_contact_defaults(self._duct_controls)
+        if self._updating:
+            return
+        if self._sync_duct_spec():
+            self._current_item.update_system(self._current_item.system)
+
+    def _handle_duct_value_changed(self, _value: object) -> None:
+        if self._updating:
+            return
+        if self._sync_duct_spec():
+            self._current_item.update_system(self._current_item.system)
+
+    def _sync_duct_spec(self) -> bool:
+        if self._updating or not self._current_item or not self._duct_controls:
+            return False
+
+        system = self._current_item.system
+        if system.kind is not CableSystemKind.SINGLE_CORE:
+            return False
+
+        controls = self._duct_controls
+        if not controls.enable.isChecked():
+            if system.duct is not None:
+                system.duct = None
+                return True
+            return False
+
+        material = controls.material_combo.currentData()
+        if not isinstance(material, DuctMaterial):
+            if system.duct is not None:
+                system.duct = None
+                return True
+            return False
+
+        occupancy_data = controls.occupancy_combo.currentData()
+        occupancy = occupancy_data if isinstance(occupancy_data, DuctOccupancy) else DuctOccupancy.SINGLE_PHASE_PER_DUCT
+
+        contact_candidate = DuctContactConstants(
+            u=max(controls.contact_u_spin.value(), 0.0),
+            v=max(controls.contact_v_spin.value(), 0.0),
+            y=max(controls.contact_y_spin.value(), 0.0),
+        )
+        default_contact = material.contact_defaults
+        contact_override = contact_candidate if contact_candidate != default_contact else None
+
+        new_spec = DuctSpecification(
+            material=material,
+            inner_diameter_mm=max(controls.inner_diameter_spin.value(), 0.0),
+            wall_thickness_mm=max(controls.wall_thickness_spin.value(), 0.0),
+            occupancy=occupancy,
+            contact_override=contact_override,
+            medium_temperature_c=controls.medium_temp_spin.value(),
+        )
+
+        if system.duct == new_spec:
+            return False
+
+        system.duct = new_spec
+        return True
 
     def _reset_conductor_controls(self) -> None:
         control = self._conductor_control
@@ -531,6 +771,100 @@ class CableSystemEditor(QWidget):
         control.rho_th_spin.blockSignals(False)
 
         self._apply_conductor_material(set_values=True)
+
+    def _reset_duct_controls(self) -> None:
+        controls = self._duct_controls
+        if not controls:
+            return
+
+        controls.enable.blockSignals(True)
+        controls.enable.setChecked(False)
+        controls.enable.blockSignals(False)
+        self._set_duct_fields_enabled(controls, False)
+
+        controls.material_combo.blockSignals(True)
+        if controls.material_combo.count() > 0:
+            controls.material_combo.setCurrentIndex(0)
+        controls.material_combo.blockSignals(False)
+
+        controls.inner_diameter_spin.blockSignals(True)
+        controls.inner_diameter_spin.setValue(100.0)
+        controls.inner_diameter_spin.blockSignals(False)
+
+        controls.wall_thickness_spin.blockSignals(True)
+        controls.wall_thickness_spin.setValue(5.0)
+        controls.wall_thickness_spin.blockSignals(False)
+
+        controls.occupancy_combo.blockSignals(True)
+        controls.occupancy_combo.setCurrentIndex(0)
+        controls.occupancy_combo.blockSignals(False)
+
+        controls.medium_temp_spin.blockSignals(True)
+        controls.medium_temp_spin.setValue(20.0)
+        controls.medium_temp_spin.blockSignals(False)
+
+        self._apply_duct_material_contact_defaults(controls)
+
+    def _apply_duct_from_system(self, system: CableSystem) -> None:
+        controls = self._duct_controls
+        if not controls:
+            return
+
+        is_supported = system.kind is CableSystemKind.SINGLE_CORE
+        controls.group.setEnabled(is_supported)
+        if not is_supported:
+            self._reset_duct_controls()
+            return
+
+        duct = system.duct
+        controls.enable.blockSignals(True)
+        controls.enable.setChecked(duct is not None)
+        controls.enable.blockSignals(False)
+
+        self._set_duct_fields_enabled(controls, duct is not None)
+
+        if not duct:
+            self._apply_duct_material_contact_defaults(controls)
+            return
+
+        # Material selection
+        controls.material_combo.blockSignals(True)
+        self._set_combo_to_duct_material(controls.material_combo, duct.material)
+        controls.material_combo.blockSignals(False)
+        self._apply_duct_material_contact_defaults(controls)
+
+        controls.inner_diameter_spin.blockSignals(True)
+        controls.inner_diameter_spin.setValue(max(duct.inner_diameter_mm, 0.0))
+        controls.inner_diameter_spin.blockSignals(False)
+
+        wall = duct.wall_thickness_mm if duct.wall_thickness_mm is not None else 0.0
+        controls.wall_thickness_spin.blockSignals(True)
+        controls.wall_thickness_spin.setValue(max(wall, 0.0))
+        controls.wall_thickness_spin.blockSignals(False)
+
+        occupancy = duct.occupancy or DuctOccupancy.SINGLE_PHASE_PER_DUCT
+        controls.occupancy_combo.blockSignals(True)
+        index = controls.occupancy_combo.findData(occupancy)
+        controls.occupancy_combo.setCurrentIndex(index if index >= 0 else 0)
+        controls.occupancy_combo.blockSignals(False)
+
+        controls.medium_temp_spin.blockSignals(True)
+        medium_temp = duct.medium_temperature_c if duct.medium_temperature_c is not None else 20.0
+        controls.medium_temp_spin.setValue(medium_temp)
+        controls.medium_temp_spin.blockSignals(False)
+
+        contact = duct.contact_constants()
+        controls.contact_u_spin.blockSignals(True)
+        controls.contact_u_spin.setValue(contact.u)
+        controls.contact_u_spin.blockSignals(False)
+
+        controls.contact_v_spin.blockSignals(True)
+        controls.contact_v_spin.setValue(contact.v)
+        controls.contact_v_spin.blockSignals(False)
+
+        controls.contact_y_spin.blockSignals(True)
+        controls.contact_y_spin.setValue(contact.y)
+        controls.contact_y_spin.blockSignals(False)
 
     def _apply_conductor_from_phase(self, phase: CablePhase) -> None:
         control = self._conductor_control

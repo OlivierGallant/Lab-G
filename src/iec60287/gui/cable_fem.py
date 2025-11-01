@@ -483,6 +483,16 @@ class CableFEMPanel(QWidget):
         self._worker_thread = None
         self._worker = None
 
+    # --------------------------------------------------------------- reporting
+    def latest_heatmap_path(self) -> Optional[Path]:
+        """Return the most recent FEM heatmap file if available."""
+        if not self._latest_report:
+            return None
+        heatmap = self._latest_report.heatmap_path
+        if heatmap is None or not heatmap.exists():
+            return None
+        return heatmap
+
     # ----------------------------------------------------------------- helpers
     def _infer_soil_resistivity(self) -> Optional[float]:
         layers = self._scene.config.layers

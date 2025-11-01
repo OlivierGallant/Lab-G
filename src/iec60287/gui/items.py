@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 from iec60287.model import (
     CableSystem,
     CableSystemKind,
+    DuctOccupancy,
     LayerRole,
     LayerSpec,
     MaterialClassification,
@@ -100,6 +101,7 @@ class CableSystemItem(BaseGraphicsItem):
         QColor("#c2255c"),
         QColor("#2b8a3e"),
     )
+    _DUCT_COLOUR = QColor("#5f5f5f")
     ROLE_COLOURS: Dict[LayerRole, QColor] = {
         LayerRole.INNER_SCREEN: QColor("#495057"),
         LayerRole.OUTER_SCREEN: QColor("#343a40"),
@@ -160,6 +162,27 @@ class CableSystemItem(BaseGraphicsItem):
             conductor_radius: float = profile["conductor_radius"]
             layers: List[tuple[LayerSpec, float, float]] = profile["layers"]
 
+            if profile.get("draw_duct"):
+                duct_outer = profile.get("duct_outer_radius") or 0.0
+                if duct_outer > 0.0:
+                    duct_inner = profile.get("duct_inner_radius") or 0.0
+                    duct_colour = QColor(self._DUCT_COLOUR)
+                    fill_colour = QColor(duct_colour)
+                    fill_colour.setAlpha(30)
+                    duct_centre = profile.get("duct_center")
+                    if not isinstance(duct_centre, QPointF):
+                        duct_centre = centre
+                    painter.setPen(self._pen(duct_colour))
+                    painter.setBrush(fill_colour)
+                    painter.drawEllipse(duct_centre, duct_outer, duct_outer)
+                    painter.setBrush(Qt.NoBrush)
+                    if duct_inner > 0.0:
+                        inner_pen = QPen(duct_colour.darker(140), 1.0, Qt.DotLine)
+                        inner_pen.setCosmetic(True)
+                        painter.setPen(inner_pen)
+                        painter.drawEllipse(duct_centre, duct_inner, duct_inner)
+                        painter.setPen(self._pen(duct_colour))
+
             # Draw layers from outermost to innermost.
             for layer, _inner, outer in reversed(layers):
                 colour = self._colour_for_layer(layer)
@@ -207,7 +230,7 @@ class CableSystemItem(BaseGraphicsItem):
         self._phase_geometry = []
         self._phase_profiles = []
 
-        offsets = list(self.system.phase_offsets_mm())
+        offsets = list(self.system.phase_offsets_mm()) or [(0.0, 0.0)]
 
         if self.system.kind is CableSystemKind.SINGLE_CORE and self.system.single_core_phase:
             phase = self.system.single_core_phase
@@ -215,9 +238,25 @@ class CableSystemItem(BaseGraphicsItem):
             radial_profile = phase.radial_profile_mm()
             outer_radius = radial_profile[-1][2] if radial_profile else conductor_radius
 
-            for offset in offsets:
+            duct = self.system.duct if self.system.duct and self.system.duct.has_valid_geometry() else None
+            duct_outer_radius = (duct.outer_diameter_mm / 2.0) if duct else None
+            duct_inner_radius = (duct.inner_diameter_mm / 2.0) if duct else None
+            shared_duct = bool(duct and duct.occupancy is DuctOccupancy.THREE_PHASES_PER_DUCT)
+            duct_centre = None
+            if shared_duct and offsets:
+                avg_x = sum(offset[0] for offset in offsets) / len(offsets)
+                avg_y = sum(offset[1] for offset in offsets) / len(offsets)
+                duct_centre = QPointF(avg_x, avg_y)
+
+            for index, offset in enumerate(offsets):
                 centre = QPointF(*offset)
-                self._phase_geometry.append((centre, outer_radius * 2.0))
+                envelope_diameter = outer_radius * 2.0
+                draw_duct = False
+                if duct:
+                    if not shared_duct and duct_outer_radius and duct_outer_radius > 0.0:
+                        envelope_diameter = max(envelope_diameter, duct_outer_radius * 2.0)
+                    draw_duct = (not shared_duct) or index == 0
+                self._phase_geometry.append((centre, envelope_diameter))
                 layers_copy = [(layer, inner, outer) for layer, inner, outer in radial_profile]
                 self._phase_profiles.append(
                     {
@@ -225,13 +264,20 @@ class CableSystemItem(BaseGraphicsItem):
                         "conductor_radius": conductor_radius,
                         "layers": layers_copy,
                         "outer_radius": outer_radius,
+                        "duct_outer_radius": duct_outer_radius,
+                        "duct_inner_radius": duct_inner_radius,
+                        "draw_duct": draw_duct,
+                        "duct_center": duct_centre if shared_duct else centre,
                     }
                 )
+
+            if shared_duct and duct_outer_radius and duct_outer_radius > 0.0 and duct_centre is not None:
+                self._phase_geometry.append((duct_centre, duct_outer_radius * 2.0))
         elif self.system.kind is CableSystemKind.MULTICORE and self.system.multicore:
             multicore = self.system.multicore
             diameter = multicore.outer_diameter_mm
             outer_radius = diameter / 2.0
-            for offset in offsets or [(0.0, 0.0)]:
+            for offset in offsets:
                 centre = QPointF(*offset)
                 self._phase_geometry.append((centre, diameter))
                 self._phase_profiles.append(

@@ -494,13 +494,20 @@ def _generate_axis_nodes(
 
         near_spacing = _near_field_spacing(cable, gap_limit)
         far_spacing = max(_soil_spacing(cable, default_far_spacing), near_spacing)
+        far_growth_factor = max(growth_factor * 1.3, growth_factor + 0.2)
+        far_limit_multiplier = 6.0
+        near_extent = max(4.0 * cable.overall_radius_mm, 150.0)
+        far_spacing_cap = max(far_spacing * far_limit_multiplier, far_spacing)
 
         # positive direction
         step = near_spacing
         distance = near_spacing
         while center + distance < max_bound - eps:
             positions.add(center + distance)
-            step = min(step * growth_factor, far_spacing)
+            if distance < near_extent:
+                step = min(step * growth_factor, far_spacing)
+            else:
+                step = min(step * far_growth_factor, far_spacing_cap)
             distance += step
 
         # negative direction
@@ -508,7 +515,10 @@ def _generate_axis_nodes(
         distance = near_spacing
         while center - distance > min_bound + eps:
             positions.add(center - distance)
-            step = min(step * growth_factor, far_spacing)
+            if distance < near_extent:
+                step = min(step * growth_factor, far_spacing)
+            else:
+                step = min(step * far_growth_factor, far_spacing_cap)
             distance += step
 
     return sorted(positions)

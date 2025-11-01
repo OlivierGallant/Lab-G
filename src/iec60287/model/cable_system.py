@@ -196,6 +196,127 @@ class MultiCoreCable:
     sheath_bonding: SheathBonding = SheathBonding.BOTH_ENDS
 
 
+class DuctOccupancy(Enum):
+    """Supported ways of assigning phases to ducts/pipes."""
+
+    SINGLE_PHASE_PER_DUCT = "single_phase_per_duct"
+    THREE_PHASES_PER_DUCT = "three_phases_per_duct"
+
+    def phases_in_single_duct(self) -> int:
+        if self is DuctOccupancy.THREE_PHASES_PER_DUCT:
+            return 3
+        return 1
+
+
+@dataclass(frozen=True)
+class DuctContactConstants:
+    """Installation-dependent factors for cable-to-duct thermal resistance."""
+
+    u: float
+    v: float
+    y: float
+
+    def denominator(self, medium_temp_c: float) -> float:
+        """Return the multiplier [1 + 0.1 (V + Y θ_m)]."""
+        return 0.1 * (self.v + self.y * medium_temp_c)
+
+
+@dataclass(frozen=True)
+class DuctMaterial:
+    """Physical properties for duct wall materials."""
+
+    name: str
+    thermal_resistivity_k_m_per_w: float
+    is_metallic: bool = False
+    notes: Optional[str] = None
+    contact_defaults: DuctContactConstants = field(
+        default_factory=lambda: DuctContactConstants(u=0.086, v=0.60, y=0.0)
+    )
+
+
+@dataclass
+class DuctSpecification:
+    """Defines a surrounding duct or pipe for a cable system."""
+
+    material: DuctMaterial
+    inner_diameter_mm: float
+    wall_thickness_mm: float
+    occupancy: DuctOccupancy = DuctOccupancy.SINGLE_PHASE_PER_DUCT
+    contact_override: Optional[DuctContactConstants] = None
+    medium_temperature_c: float = 20.0
+
+    @property
+    def outer_diameter_mm(self) -> float:
+        return max(self.inner_diameter_mm + 2.0 * self.wall_thickness_mm, 0.0)
+
+    def equivalent_cable_diameter_mm(self, cable_diameter_mm: float) -> float:
+        """Return De for T4' based on the occupied cores."""
+        if self.occupancy is DuctOccupancy.THREE_PHASES_PER_DUCT:
+            return 2.15 * cable_diameter_mm
+        return cable_diameter_mm
+
+    def has_valid_geometry(self) -> bool:
+        return self.inner_diameter_mm > 0.0 and self.outer_diameter_mm > self.inner_diameter_mm
+
+    def contact_constants(self) -> DuctContactConstants:
+        if self.contact_override is not None:
+            return self.contact_override
+        return self.material.contact_defaults
+
+
+PLASTIC_CONTACT = DuctContactConstants(u=1.87, v=0.312, y=0.003)
+EARTHENWARE_CONTACT = DuctContactConstants(u=1.87, v=0.28, y=0.003)
+WATER_FILLED_CONTACT = DuctContactConstants(u=0.1, v=0.03, y=0.001)
+GENERIC_CONTACT = DuctContactConstants(u=0.086, v=0.60, y=0.0)
+
+HDPE_DUCT = DuctMaterial(
+    name="HDPE",
+    thermal_resistivity_k_m_per_w=3.5,
+    notes="High-density polyethylene conduit.",
+    contact_defaults=PLASTIC_CONTACT,
+)
+PVC_DUCT = DuctMaterial(
+    name="PVC",
+    thermal_resistivity_k_m_per_w=5.0,
+    notes="Rigid polyvinyl chloride duct.",
+    contact_defaults=PLASTIC_CONTACT,
+)
+CONCRETE_DUCT = DuctMaterial(
+    name="Concrete",
+    thermal_resistivity_k_m_per_w=1.5,
+    notes="Precast concrete duct segment.",
+    contact_defaults=EARTHENWARE_CONTACT,
+)
+EARTHENWARE_DUCT = DuctMaterial(
+    name="Earthenware",
+    thermal_resistivity_k_m_per_w=2.0,
+    notes="Traditional earthenware duct.",
+    contact_defaults=EARTHENWARE_CONTACT,
+)
+WATER_FILLED_DUCT = DuctMaterial(
+    name="Water filled",
+    thermal_resistivity_k_m_per_w=0.6,
+    notes="Duct completely filled with water.",
+    contact_defaults=WATER_FILLED_CONTACT,
+)
+STEEL_DUCT = DuctMaterial(
+    name="Steel",
+    thermal_resistivity_k_m_per_w=0.0,
+    is_metallic=True,
+    notes="Galvanised steel pipe; assume negligible wall resistance.",
+    contact_defaults=GENERIC_CONTACT,
+)
+
+STANDARD_DUCT_MATERIALS: Sequence[DuctMaterial] = (
+    HDPE_DUCT,
+    PVC_DUCT,
+    CONCRETE_DUCT,
+    EARTHENWARE_DUCT,
+    WATER_FILLED_DUCT,
+    STEEL_DUCT,
+)
+
+
 @dataclass
 class CableSystem:
     """Canonical representation of a three-phase cable system ready for placement."""
@@ -209,6 +330,7 @@ class CableSystem:
     multicore: Optional[MultiCoreCable] = None
     nominal_current_a: Optional[float] = None
     nominal_voltage_kv: Optional[float] = None
+    duct: Optional[DuctSpecification] = None
 
     def phase_diameters_mm(self) -> Sequence[float]:
         """Return the relevant phase diameters for drawing or checks."""
@@ -258,6 +380,16 @@ class CableSystem:
                     yield "Single-core phase requires an insulation layer."
                 if not phase.conductor.material.is_conductive():
                     yield "Conductor material must be conductive."
+            if self.duct:
+                if not self.duct.has_valid_geometry():
+                    yield "Duct requires positive inner diameter and wall thickness."
+                phase = self.single_core_phase
+                if phase:
+                    cable_diameter = phase.overall_diameter_mm()
+                    if self.duct.inner_diameter_mm <= cable_diameter:
+                        yield "Duct inner diameter must exceed cable diameter."
+                if self.duct.medium_temperature_c < -50.0:
+                    yield "Duct medium temperature appears unrealistically low."
         elif self.kind is CableSystemKind.MULTICORE:
             if self.multicore is None:
                 yield "Multicore system requires `multicore` cable details."

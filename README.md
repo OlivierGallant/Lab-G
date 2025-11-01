@@ -26,3 +26,17 @@ Prototype PySide6 application for experimenting with cable placement prior to in
 - Capture geometric and material properties for each placement item.
 - Serialize layouts to JSON for later IEC 60287 calculations.
 - Hook thermal calculations (T1–T4) into the model once the layout data model is stable.
+
+## Benchmark scripts
+
+Two standalone utilities exercise the calculation engines without launching the GUI (they still require a `PySide6` runtime because the core widgets are reused):
+
+- `scripts/ampacity_benchmark.py` prints the IEC 60287 R/T1–T4 values and ampacity for a reference 240 mm² CU trefoil, both directly in soil and inside a 160 mm HDPE duct.
+- `scripts/fem_benchmark.py` generates a structured mesh for the same layouts, runs the finite-difference solver, and reports heat loads and resulting cable temperatures.
+
+Run them from the project root after installing dependencies, for example:
+
+```bash
+python scripts/ampacity_benchmark.py
+python scripts/fem_benchmark.py
+```

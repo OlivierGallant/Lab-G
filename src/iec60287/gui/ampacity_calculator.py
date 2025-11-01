@@ -18,8 +18,14 @@ from PySide6.QtWidgets import (
 )
 
 from iec60287.gui.items import CableSystemItem
-from iec60287.gui.placement_scene import PlacementScene, TrenchLayer
-from iec60287.model import CableSystem, CableSystemKind, LayerRole
+from iec60287.gui.placement_scene import PlacementScene, TrenchLayer, TrenchLayerKind
+from iec60287.model import (
+    CableSystem,
+    CableSystemKind,
+    DuctSpecification,
+    LayerRole,
+    SingleCoreArrangement,
+)
 
 
 @dataclass
@@ -231,7 +237,7 @@ class CableAmpacityCalculator(QWidget):
 
         resistance = self._conductor_resistance(system, params.conductor_temp_c, issues)
         t1, t2, t3 = self._radial_resistances(system, issues)
-        t4 = self._soil_resistance(instance, population, issues)
+        t4 = self._external_resistance(instance, population, params, issues)
 
         ampacity = None
         delta_theta = params.conductor_temp_c - params.ambient_temp_c
@@ -362,10 +368,11 @@ class CableAmpacityCalculator(QWidget):
         t3 = self._sum_layer_resistances(t3_layers, issues, label="T3")
         return (t1, t2, t3)
 
-    def _soil_resistance(
+    def _external_resistance(
         self,
         instance: CablePhaseInstance,
         population: Sequence[CablePhaseInstance],
+        params: CalculatorParams,
         issues: List[str],
     ) -> Optional[float]:
         config = self._scene.config
@@ -373,19 +380,262 @@ class CableAmpacityCalculator(QWidget):
         _, centre_y = instance.position_mm
         depth_mm = max(centre_y - surface_y, 0.0)
 
-        outer_diameter_mm = instance.outer_diameter_mm or self._outer_diameter_mm(instance.system)
-        if outer_diameter_mm is None or outer_diameter_mm <= 0.0:
-            issues.append("Outer diameter required for T4.")
-            return None
-
         soil_layer = self._soil_layer_for_depth(config.layers, depth_mm)
         resistivity = soil_layer.thermal_resistivity_k_m_per_w if soil_layer else None
         if resistivity is None or resistivity <= 0.0:
             issues.append("Thermal resistivity for soil layer unavailable.")
             return None
 
+        system = instance.system
+        duct = system.duct if isinstance(system.duct, DuctSpecification) else None
+        environment = self._determine_environment(system, depth_mm, soil_layer)
+
+        if environment == "AIR":
+            return self._t4_air(
+                instance=instance,
+                depth_mm=depth_mm,
+                issues=issues,
+            )
+        if environment == "DUCT" and duct:
+            return self._t4_duct(
+                instance=instance,
+                system=system,
+                duct=duct,
+                soil_resistivity=resistivity,
+                depth_mm=depth_mm,
+                population=population,
+                surface_level_y=surface_y,
+                params=params,
+                issues=issues,
+            )
+        if environment == "CONCRETE_DUCT" and duct:
+            concrete_result = self._t4_concrete_duct(
+                instance=instance,
+                system=system,
+                duct=duct,
+                soil_layer=soil_layer,
+                depth_mm=depth_mm,
+                population=population,
+                surface_level_y=surface_y,
+                params=params,
+                issues=issues,
+            )
+            if concrete_result is not None:
+                return concrete_result
+            # Fall back to standard duct model if concrete-specific data is incomplete.
+            return self._t4_duct(
+                instance=instance,
+                system=system,
+                duct=duct,
+                soil_resistivity=resistivity,
+                depth_mm=depth_mm,
+                population=population,
+                surface_level_y=surface_y,
+                params=params,
+                issues=issues,
+            )
+        if environment == "TROUGH":
+            return self._t4_trough(
+                instance=instance,
+                soil_layer=soil_layer,
+                depth_mm=depth_mm,
+                population=population,
+                surface_level_y=surface_y,
+                issues=issues,
+            )
+
+        outer_diameter_mm = instance.outer_diameter_mm or self._outer_diameter_mm(system)
+        if outer_diameter_mm is None or outer_diameter_mm <= 0.0:
+            issues.append("Outer diameter required for T4.")
+            return None
         if depth_mm <= 0.0:
             issues.append("Cable axis must be below surface for T4.")
+            return None
+
+        return self._t4_direct_buried(
+            instance=instance,
+            population=population,
+            surface_level_y=surface_y,
+            outer_diameter_mm=outer_diameter_mm,
+            depth_mm=depth_mm,
+            soil_resistivity=resistivity,
+            issues=issues,
+        )
+
+    def _determine_environment(
+        self,
+        system: CableSystem,
+        depth_mm: float,
+        soil_layer: Optional[TrenchLayer],
+    ) -> str:
+        if depth_mm <= 0.0:
+            return "AIR"
+
+        if system.duct and system.duct.has_valid_geometry():
+            if soil_layer and soil_layer.kind is TrenchLayerKind.CONCRETE:
+                return "CONCRETE_DUCT"
+            return "DUCT"
+
+        if soil_layer and soil_layer.kind is TrenchLayerKind.AIR:
+            return "AIR"
+
+        if soil_layer and soil_layer.kind is TrenchLayerKind.CONCRETE:
+            return "TROUGH"
+
+        return "SOIL"
+
+    def _t4_direct_buried(
+        self,
+        instance: CablePhaseInstance,
+        population: Sequence[CablePhaseInstance],
+        surface_level_y: float,
+        outer_diameter_mm: float,
+        depth_mm: float,
+        soil_resistivity: float,
+        issues: List[str],
+    ) -> Optional[float]:
+        if soil_resistivity <= 0.0:
+            issues.append("Thermal resistivity for soil layer unavailable.")
+            return None
+
+        u = (2.0 * depth_mm) / outer_diameter_mm
+        if u <= 1.0:
+            issues.append("Depth-to-diameter ratio too small for T4.")
+            return None
+
+        group_term = self._grouped_direct_burial_resistance(
+            instance.system,
+            soil_resistivity,
+            u,
+            outer_diameter_mm,
+            issues,
+        )
+        if group_term is not None:
+            mutual_factor = self._mutual_factor(
+                instance,
+                population,
+                surface_level_y,
+                issues,
+                skip_system=instance.system,
+            )
+            if mutual_factor <= 0.0:
+                issues.append("Invalid logarithm argument for T4.")
+                return None
+            if mutual_factor == 1.0:
+                return group_term
+            return group_term + (soil_resistivity / (2.0 * math.pi)) * math.log(mutual_factor)
+
+        return self._buried_medium_resistance(
+            outer_diameter_mm=outer_diameter_mm,
+            depth_mm=depth_mm,
+            soil_resistivity=soil_resistivity,
+            instance=instance,
+            population=population,
+            surface_level_y=surface_level_y,
+            issues=issues,
+        )
+
+    def _grouped_direct_burial_resistance(
+        self,
+        system: CableSystem,
+        soil_resistivity: float,
+        u: float,
+        outer_diameter_mm: float,
+        issues: List[str],
+    ) -> Optional[float]:
+        if system.kind is not CableSystemKind.SINGLE_CORE:
+            return None
+
+        arrangement = system.arrangement or SingleCoreArrangement.FLAT
+        phase_count = len(system.phase_offsets_mm()) or 1
+        sheath_type = self._sheath_category(system)
+
+        offsets = system.phase_offsets_mm()
+        min_spacing = None
+        if offsets and len(offsets) > 1 and outer_diameter_mm > 0.0:
+            min_spacing = min(
+                math.hypot(x1 - x2, y1 - y2)
+                for idx, (x1, y1) in enumerate(offsets)
+                for x2, y2 in offsets[idx + 1 :]
+            )
+            touching_threshold = outer_diameter_mm * 1.05
+            if min_spacing is not None and min_spacing > touching_threshold:
+                return None
+
+        if arrangement is SingleCoreArrangement.TREFOIL and phase_count == 3:
+            if u <= 0.0:
+                issues.append("Invalid burial ratio for trefoil grouping.")
+                return None
+            if sheath_type == "metallic":
+                if 2.0 * u <= 0.0:
+                    issues.append("Invalid logarithm argument for trefoil metallic T4.")
+                    return None
+                return (soil_resistivity / (1.5 * math.pi)) * math.log(2.0 * u) - 0.63 * soil_resistivity
+            # Treat part-metallic as metallic for conservatism.
+            if u <= 0.0:
+                issues.append("Invalid burial ratio for trefoil grouping.")
+                return None
+            return (soil_resistivity / (2.0 * math.pi)) * (math.log(2.0 * u) + math.log(u))
+
+        if arrangement is SingleCoreArrangement.FLAT:
+            if phase_count == 3:
+                if u < 5.0:
+                    return None
+                if sheath_type == "metallic":
+                    argument = 0.475 * math.log(2 * u) - 0.346
+                else:
+                    argument = 0.475 * math.log(2 * u) - 0.142
+                if argument <= 0.0:
+                    issues.append("Invalid logarithm argument for flat grouping T4.")
+                    return None
+                return soil_resistivity * argument
+            if phase_count == 2:
+                if u < 5.0:
+                    return None
+                if sheath_type == "metallic":
+                    argument = 1.5 * u - 0.45
+                else:
+                    argument = 0.95 * u - 0.29
+                if argument <= 0.0:
+                    issues.append("Invalid logarithm argument for flat grouping T4.")
+                    return None
+                return (soil_resistivity / math.pi) * math.log(argument)
+
+        return None
+
+    def _sheath_category(self, system: CableSystem) -> str:
+        phase = system.single_core_phase if system.kind is CableSystemKind.SINGLE_CORE else None
+        if not phase:
+            return "non_metallic"
+
+        def _is_metallic(layer_role: LayerRole) -> bool:
+            layer = phase.get_layer(layer_role)
+            if not layer or not layer.material:
+                return False
+            resistivity = layer.material.electrical_resistivity_ohm_mm2_per_m
+            return resistivity is not None and resistivity > 0.0 and resistivity < 1.0
+
+        if _is_metallic(LayerRole.SHEATH) or _is_metallic(LayerRole.ARMOUR):
+            return "metallic"
+        return "non_metallic"
+
+    def _buried_medium_resistance(
+        self,
+        outer_diameter_mm: float,
+        depth_mm: float,
+        soil_resistivity: float,
+        instance: CablePhaseInstance,
+        population: Sequence[CablePhaseInstance],
+        surface_level_y: float,
+        issues: List[str],
+        skip_system: Optional[CableSystem] = None,
+    ) -> Optional[float]:
+        if depth_mm <= 0.0:
+            issues.append("Cable axis must be below surface for T4.")
+            return None
+
+        if outer_diameter_mm <= 0.0:
+            issues.append("Outer diameter required for T4.")
             return None
 
         u = (2.0 * depth_mm) / outer_diameter_mm
@@ -398,14 +648,250 @@ class CableAmpacityCalculator(QWidget):
         else:
             base_term = u + math.sqrt(u * u - 1.0)
 
-        mutual_factor = self._mutual_factor(instance, population, surface_y, issues)
+        mutual_factor = self._mutual_factor(instance, population, surface_level_y, issues, skip_system=skip_system)
         log_arg = base_term * mutual_factor
 
         if log_arg <= 0.0:
             issues.append("Invalid logarithm argument for T4.")
             return None
 
-        return (resistivity / (2.0 * math.pi)) * math.log(log_arg)
+        return (soil_resistivity / (2.0 * math.pi)) * math.log(log_arg)
+
+    def _t4_air(
+        self,
+        instance: CablePhaseInstance,
+        depth_mm: float,
+        issues: List[str],
+    ) -> Optional[float]:
+        issues.append("Air installation thermal resistance requires additional ambient data.")
+        if depth_mm > 0.0:
+            issues.append("Air branch selected but cable is below surface.")
+        return None
+
+    def _t4_trough(
+        self,
+        instance: CablePhaseInstance,
+        soil_layer: Optional[TrenchLayer],
+        depth_mm: float,
+        population: Sequence[CablePhaseInstance],
+        surface_level_y: float,
+        issues: List[str],
+    ) -> Optional[float]:
+        if soil_layer is None:
+            issues.append("Trough installation lacks surrounding material data.")
+            return None
+        if soil_layer.kind is TrenchLayerKind.CONCRETE:
+            issues.append("Concrete trough modelling not yet implemented; treating as direct burial.")
+            resistivity = soil_layer.thermal_resistivity_k_m_per_w
+            outer_diameter_mm = instance.outer_diameter_mm or self._outer_diameter_mm(instance.system)
+            if outer_diameter_mm is None or outer_diameter_mm <= 0.0:
+                issues.append("Outer diameter required for trough model.")
+                return None
+            return self._buried_medium_resistance(
+                outer_diameter_mm=outer_diameter_mm,
+                depth_mm=depth_mm,
+                soil_resistivity=resistivity,
+                instance=instance,
+                population=population,
+                surface_level_y=surface_level_y,
+                issues=issues,
+            )
+        issues.append("Open trough installations not supported; assuming ambient air cooling.")
+        return None
+
+    def _t4_duct(
+        self,
+        instance: CablePhaseInstance,
+        system: CableSystem,
+        duct: DuctSpecification,
+        soil_resistivity: float,
+        depth_mm: float,
+        population: Sequence[CablePhaseInstance],
+        surface_level_y: float,
+        params: CalculatorParams,
+        issues: List[str],
+    ) -> Optional[float]:
+        if depth_mm <= 0.0:
+            issues.append("Cable axis must be below surface for T4.")
+            return None
+
+        phase = system.single_core_phase
+        if system.kind is not CableSystemKind.SINGLE_CORE or not phase:
+            issues.append("Duct modelling currently supports single-core systems only.")
+            return None
+
+        cable_diameter_mm = phase.overall_diameter_mm()
+        if cable_diameter_mm <= 0.0:
+            issues.append("Cable diameter required for duct thermal model.")
+            return None
+
+        equivalent_diameter_mm = duct.equivalent_cable_diameter_mm(cable_diameter_mm)
+        equivalent_diameter_m = equivalent_diameter_mm / 1000.0
+        if equivalent_diameter_m <= 0.0:
+            issues.append("Equivalent cable diameter for duct must be positive.")
+            return None
+
+        contact = duct.contact_constants()
+        if contact.u <= 0.0:
+            issues.append("Duct contact constant U must be positive.")
+            return None
+
+        medium_temp_c = duct.medium_temperature_c if duct.medium_temperature_c is not None else params.ambient_temp_c
+        denominator = contact.denominator(medium_temp_c)
+        if denominator <= 0.0:
+            issues.append("Duct contact denominator is non-positive.")
+            return None
+
+        t4_prime = contact.u / (1 + denominator * equivalent_diameter_m)
+
+        inner_m = duct.inner_diameter_mm / 1000.0
+        outer_m = duct.outer_diameter_mm / 1000.0
+        if inner_m <= 0.0 or outer_m <= inner_m:
+            issues.append("Duct geometry invalid for wall thermal resistance.")
+            return None
+
+        t4_double_prime = 0.0
+        rho_t = duct.material.thermal_resistivity_k_m_per_w
+        if not duct.material.is_metallic:
+            if rho_t is None or rho_t <= 0.0:
+                issues.append("Thermal resistivity for duct material unavailable.")
+                return None
+            t4_double_prime = (rho_t / (2.0 * math.pi)) * math.log(outer_m / inner_m)
+
+        t4_triple_prime = self._buried_medium_resistance(
+            outer_diameter_mm=duct.outer_diameter_mm,
+            depth_mm=depth_mm,
+            soil_resistivity=soil_resistivity,
+            instance=instance,
+            population=population,
+            surface_level_y=surface_level_y,
+            issues=issues,
+        )
+        if t4_triple_prime is None:
+            return None
+
+        return t4_prime + t4_double_prime + t4_triple_prime
+
+    def _t4_concrete_duct(
+        self,
+        instance: CablePhaseInstance,
+        system: CableSystem,
+        duct: DuctSpecification,
+        soil_layer: Optional[TrenchLayer],
+        depth_mm: float,
+        population: Sequence[CablePhaseInstance],
+        surface_level_y: float,
+        params: CalculatorParams,
+        issues: List[str],
+    ) -> Optional[float]:
+        if not soil_layer or soil_layer.kind is not TrenchLayerKind.CONCRETE:
+            return None
+
+        rho_c = soil_layer.thermal_resistivity_k_m_per_w
+        if rho_c is None or rho_c <= 0.0:
+            issues.append("Concrete layer requires thermal resistivity.")
+            return None
+
+        surrounding_soil = self._find_adjacent_soil_layer(soil_layer)
+        rho_e = surrounding_soil.thermal_resistivity_k_m_per_w if surrounding_soil else rho_c
+
+        phase = system.single_core_phase
+        if not phase:
+            issues.append("Concrete duct bank requires single-core phase definition.")
+            return None
+
+        cable_diameter_mm = phase.overall_diameter_mm()
+        equivalent_diameter_m = duct.equivalent_cable_diameter_mm(cable_diameter_mm) / 1000.0
+        if equivalent_diameter_m <= 0.0:
+            issues.append("Equivalent cable diameter for duct must be positive.")
+            return None
+
+        contact = duct.contact_constants()
+        medium_temp_c = duct.medium_temperature_c if duct.medium_temperature_c is not None else params.ambient_temp_c
+        denominator = contact.denominator(medium_temp_c)
+        if denominator <= 0.0:
+            issues.append("Duct contact denominator is non-positive.")
+            return None
+        t4_prime = contact.u / (denominator * equivalent_diameter_m)
+
+        duct_wall_term = 0.0
+        rho_t = duct.material.thermal_resistivity_k_m_per_w
+        if not duct.material.is_metallic:
+            if rho_t is None or rho_t <= 0.0:
+                issues.append("Thermal resistivity for duct material unavailable.")
+                return None
+            inner_m = duct.inner_diameter_mm / 1000.0
+            outer_m = duct.outer_diameter_mm / 1000.0
+            if inner_m <= 0.0 or outer_m <= inner_m:
+                issues.append("Duct geometry invalid for wall thermal resistance.")
+                return None
+            duct_wall_term = (rho_t / (2.0 * math.pi)) * math.log(outer_m / inner_m)
+
+        x_m = self._scene.config.trench_width_mm / 1000.0
+        y_m = max(soil_layer.thickness_mm, 0.0) / 1000.0
+        if x_m <= 0.0 or y_m <= 0.0:
+            issues.append("Concrete duct bank dimensions invalid.")
+            return None
+        if y_m / x_m >= 3.0:
+            issues.append("Concrete duct bank aspect ratio exceeds IEC correlation limit.")
+            return None
+
+        r_b = self._equivalent_bank_radius(x_m, y_m)
+        if r_b <= 0.0:
+            issues.append("Equivalent duct bank radius invalid.")
+            return None
+
+        L_g_m = depth_mm / 1000.0
+        u_b = L_g_m / r_b
+        if u_b <= 1.0:
+            issues.append("Concrete duct bank burial ratio too small.")
+            return None
+
+        sqrt_term = math.sqrt(u_b * u_b - 1.0)
+        t4_concrete = (rho_c / (2.0 * math.pi)) * math.log(u_b + sqrt_term)
+
+        n_loaded = max(len(system.phase_offsets_mm()), 1)
+        delta_t4 = (n_loaded / (2.0 * math.pi)) * (rho_e - rho_c) * math.log(u_b + sqrt_term)
+
+        mutual_factor = self._mutual_factor(
+            instance,
+            population,
+            surface_level_y,
+            issues,
+            skip_system=instance.system,
+        )
+        if mutual_factor <= 0.0:
+            issues.append("Invalid logarithm argument for concrete duct mutual factor.")
+            return None
+
+        adjustment = 0.0
+        if mutual_factor != 1.0:
+            adjustment = (rho_e / (2.0 * math.pi)) * math.log(mutual_factor)
+
+        return t4_prime + duct_wall_term + t4_concrete + delta_t4 + adjustment
+
+    def _find_adjacent_soil_layer(self, target: TrenchLayer) -> Optional[TrenchLayer]:
+        layers = self._scene.config.layers
+        try:
+            index = layers.index(target)
+        except ValueError:
+            return None
+
+        for offset in (1, -1):
+            neighbour_index = index + offset
+            if 0 <= neighbour_index < len(layers):
+                candidate = layers[neighbour_index]
+                if candidate.kind is not TrenchLayerKind.CONCRETE and candidate.thermal_resistivity_k_m_per_w > 0.0:
+                    return candidate
+        return None
+
+    @staticmethod
+    def _equivalent_bank_radius(x_m: float, y_m: float) -> float:
+        ratio = x_m / y_m if y_m != 0 else 0.0
+        if y_m == 0.0 or ratio <= 0.0:
+            return -1.0
+        term = 0.5 * (ratio) * (4.0 / math.pi - ratio) * math.log(1.0 + (y_m * y_m) / (x_m * x_m))
+        return math.exp(term + math.log(x_m / 2.0))
 
     @staticmethod
     def _outer_diameter_mm(system: CableSystem) -> Optional[float]:
@@ -431,6 +917,7 @@ class CableAmpacityCalculator(QWidget):
         population: Sequence[CablePhaseInstance],
         surface_level_y: float,
         issues: List[str],
+        skip_system: Optional[CableSystem] = None,
     ) -> float:
         xp, yp = target.position_mm
         mirror_y = (2.0 * surface_level_y) - yp
@@ -439,10 +926,12 @@ class CableAmpacityCalculator(QWidget):
         for other in population:
             if other is target:
                 continue
+            if skip_system is not None and other.system is skip_system:
+                continue
             xo, yo = other.position_mm
             direct = math.hypot(xp - xo, yp - yo)
             if direct <= 0.0:
-                issues.append(f"Mutual spacing undefined between {target.label} and {other.label}.")
+                # Co-located phases share conduits; ignore their mutual image contribution.
                 continue
             image_distance = math.hypot(xp - xo, mirror_y - yo)
             if image_distance <= 0.0:

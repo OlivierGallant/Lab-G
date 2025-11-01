@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtCore import QPointF, Qt, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDockWidget,
+    QMessageBox,
+    QMenu,
     QMainWindow,
     QStatusBar,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +45,10 @@ class MainWindow(QMainWindow):
         self._trench_designer = TrenchDesigner(self.scene, self)
         self._ampacity_calculator = CableAmpacityCalculator(self.scene, self)
         self._fem_panel = CableFEMPanel(self.scene, self)
+        self._open_fem_report_action = QAction("FEM Report", self)
+        self._open_fem_report_action.triggered.connect(self._open_latest_fem_report)
+        self._reports_menu = QMenu("Reports", self)
+        self._reports_menu.addAction(self._open_fem_report_action)
         self._editor_dock = self._create_editor_dock()
         self._trench_dock = self._create_trench_dock()
         self._calculator_dock = self._create_calculator_dock()
@@ -82,10 +89,20 @@ class MainWindow(QMainWindow):
         fit_action.triggered.connect(self._fit_view)
         toolbar.addAction(fit_action)
 
+        toolbar.addSeparator()
+
+        reports_button = QToolButton(self)
+        reports_button.setText("Reports")
+        reports_button.setPopupMode(QToolButton.InstantPopup)
+        reports_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        reports_button.setMenu(self._reports_menu)
+        toolbar.addWidget(reports_button)
+
         self._actions = {
             "add_cable": add_cable_action,
             "delete": delete_action,
             "fit": fit_action,
+            "fem_report": self._open_fem_report_action,
         }
 
     def _create_menus(self) -> None:
@@ -95,6 +112,7 @@ class MainWindow(QMainWindow):
         calculations_menu = self.menuBar().addMenu("&Calculations")
         calculations_menu.addAction(self._calculator_dock.toggleViewAction())
         calculations_menu.addAction(self._fem_dock.toggleViewAction())
+        self.menuBar().addMenu(self._reports_menu)
         about_menu = self.menuBar().addMenu("&About")
     def _create_shortcuts(self) -> None:
         delete_shortcut = QShortcut(QKeySequence.Delete, self)
@@ -176,6 +194,29 @@ class MainWindow(QMainWindow):
     def _fit_view(self) -> None:
         rect = self.scene.sceneRect()
         self.view.fitInView(rect, Qt.KeepAspectRatio)
+
+    def _open_latest_fem_report(self) -> None:
+        path = self._fem_panel.latest_heatmap_path()
+        if not path:
+            QMessageBox.information(
+                self,
+                "FEM Report",
+                "No FEM heatmap is available yet. Run the FEM analysis first.",
+            )
+            return
+        if not path.exists():
+            QMessageBox.warning(
+                self,
+                "FEM Report",
+                f"The FEM heatmap file at {path} is no longer available.",
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            QMessageBox.warning(
+                self,
+                "FEM Report",
+                "Unable to open the FEM heatmap with the system viewer.",
+            )
 
     def _update_status(self) -> None:
         item_count = len(self.scene.items())
