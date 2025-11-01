@@ -141,29 +141,40 @@ def _write_heatmap(
     )
     figure.colorbar(colour_plot, ax=axis, label="Temperature (°C)")
 
+    legend_handles = []
+    legend_labels: set[str] = set()
     for cable in mesh_output.cables:
+        label = cable.label or "Cable"
         circle = patches.Circle(
             (cable.centre_x_mm, cable.centre_y_mm),
             radius=cable.overall_radius_mm,
-            edgecolor="cyan",
+            edgecolor="#00c6ff",
             facecolor="none",
             linewidth=1.0,
+            label=label,
         )
         axis.add_patch(circle)
-        axis.text(
-            cable.centre_x_mm,
-            cable.centre_y_mm,
-            cable.label,
-            color="cyan",
-            ha="center",
-            va="center",
-            fontsize=8,
-        )
+        if label not in legend_labels:
+            legend_handles.append(circle)
+            legend_labels.add(label)
+
+    surface_line = axis.axhline(
+        mesh.surface_level_y,
+        color="white",
+        linestyle="--",
+        linewidth=1.0,
+        label="Surface",
+    )
+    legend_handles.insert(0, surface_line)
 
     axis.set_xlabel("x (mm)")
     axis.set_ylabel("y (mm)")
     axis.set_title("FEM Temperature Field")
     axis.set_aspect("equal", adjustable="box")
+    axis.invert_yaxis()
+    axis.grid(False)
+    if legend_handles:
+        axis.legend(handles=legend_handles, loc="upper right", fontsize=8, frameon=True)
 
     figure.savefig(heatmap_path, dpi=200)
     plt.close(figure)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, List, Sequence
 
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
@@ -37,7 +37,20 @@ def save_mesh_preview(
     fig, ax = plt.subplots(figsize=(8, 8), dpi=dpi / 25)
 
     _draw_mesh(ax, mesh)
-    _draw_cables(ax, cables)
+    cable_handles = _draw_cables(ax, cables, edge_color="#d62728")
+    surface_line = ax.axhline(
+        mesh.surface_level_y,
+        color="#4f5660",
+        linestyle="--",
+        linewidth=1.0,
+        label="Surface",
+        zorder=0,
+    )
+
+    legend_handles: List[plt.Artist] = []
+    if surface_line is not None:
+        legend_handles.append(surface_line)
+    legend_handles.extend(cable_handles)
 
     if title:
         ax.set_title(title)
@@ -47,7 +60,10 @@ def save_mesh_preview(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(min(mesh.x_nodes_mm), max(mesh.x_nodes_mm))
     ax.set_ylim(min(mesh.y_nodes_mm), max(mesh.y_nodes_mm))
+    ax.invert_yaxis()
     ax.grid(False)
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc="upper right", fontsize=8, frameon=True)
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
@@ -81,8 +97,14 @@ def _draw_mesh(ax, mesh: StructuredMesh) -> None:
     )
 
 
-def _draw_cables(ax, cables: Iterable[MeshCableDefinition]) -> None:
-    handles: list[plt.Circle] = []
+def _draw_cables(
+    ax,
+    cables: Iterable[MeshCableDefinition],
+    *,
+    edge_color: str,
+    linewidth: float = 1.2,
+) -> List[plt.Circle]:
+    handles: List[plt.Circle] = []
     labels_seen: set[str] = set()
     for cable in cables:
         label = cable.label or "Cable"
@@ -90,8 +112,8 @@ def _draw_cables(ax, cables: Iterable[MeshCableDefinition]) -> None:
             (cable.centre_x_mm, cable.centre_y_mm),
             cable.overall_radius_mm,
             fill=False,
-            color="#d62728",
-            linewidth=1.2,
+            color=edge_color,
+            linewidth=linewidth,
             zorder=2,
             label=label,
         )
@@ -99,8 +121,7 @@ def _draw_cables(ax, cables: Iterable[MeshCableDefinition]) -> None:
         if label not in labels_seen:
             handles.append(circle)
             labels_seen.add(label)
-    if handles:
-        ax.legend(handles=handles, loc="upper right", fontsize=8, frameon=True)
+    return handles
 
 
 def _triangulate_mesh(mesh: StructuredMesh) -> mtri.Triangulation | None:

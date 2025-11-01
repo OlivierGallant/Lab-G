@@ -107,6 +107,12 @@ def run_scenario(scenario: Scenario) -> None:
     for temp in result.cable_temperatures:
         print(f"  {temp.label}: avg={temp.average_temp_c:.2f} °C, max={temp.max_temp_c:.2f} °C")
     print(f"  Field extremes: min={result.min_temp_c:.2f} °C, max={result.max_temp_c:.2f} °C")
+    print(
+        "  Boundary flux (W/m): "
+        f"top={result.top_flux_w_per_m:.2f}, "
+        f"sides={result.side_flux_w_per_m:.2f}, "
+        f"bottom={result.bottom_flux_w_per_m:.2f}"
+    )
 
 
 def main() -> None:

@@ -10,13 +10,15 @@ from iec60287.model import (
     CablePhase,
     CableSystem,
     CableSystemKind,
+    DuctOccupancy,
+    DuctSpecification,
     LayerRole,
     LayerSpec,
 )
 
 _DEFAULT_LAYER_RESISTIVITY = 1.0
 _MIN_RESISTIVITY = 1e-5
-_DOMAIN_WIDTH_FACTOR = 20.0
+_AIR_GAP_RESISTIVITY = 25.0
 
 
 @dataclass
@@ -64,12 +66,23 @@ class StructuredMesh:
     y_nodes_mm: List[float]
     thermal_resistivity_k_m_per_w: List[List[float]]
     conductor_index: List[List[int]]
+    surface_level_y: float
 
 
 @dataclass
 class MeshBuildOutput:
     mesh: StructuredMesh
     cables: List[MeshCableDefinition]
+
+
+@dataclass
+class MeshDuctDefinition:
+    centre_x_mm: float
+    centre_y_mm: float
+    inner_radius_mm: float
+    outer_radius_mm: float
+    fill_resistivity_k_m_per_w: float
+    wall_resistivity_k_m_per_w: float
 
 
 def build_structured_mesh(
@@ -99,13 +112,35 @@ def build_structured_mesh(
     max_growth_ratio = max(max_growth_ratio, 0.0)
 
     cables = _collect_cables(scene)
+    ducts = _collect_ducts(scene)
 
     x_nodes_mm, y_nodes_mm = _build_domain(scene, cables, grid_step_mm, padding_mm)
     if len(x_nodes_mm) < 2 or len(y_nodes_mm) < 2:
         raise ValueError("FEM mesh domain is degenerate; adjust grid spacing or padding.")
 
     x_relevant = [c.centre_x_mm for c in cables]
+    for cable in cables:
+        radius = cable.overall_radius_mm
+        if radius > 0.0:
+            x_relevant.extend((cable.centre_x_mm - radius, cable.centre_x_mm + radius))
+    x_relevant.extend(duct.centre_x_mm for duct in ducts)
+    for duct in ducts:
+        x_relevant.extend((duct.centre_x_mm - duct.outer_radius_mm, duct.centre_x_mm + duct.outer_radius_mm))
+
     y_relevant = _relevant_y_positions(scene, cables)
+    for cable in cables:
+        radius = cable.overall_radius_mm
+        if radius > 0.0:
+            y_relevant.extend((cable.centre_y_mm - radius, cable.centre_y_mm + radius))
+    for duct in ducts:
+        y_relevant.extend(
+            (
+                duct.centre_y_mm - duct.outer_radius_mm,
+                duct.centre_y_mm - duct.inner_radius_mm,
+                duct.centre_y_mm + duct.inner_radius_mm,
+                duct.centre_y_mm + duct.outer_radius_mm,
+            )
+        )
 
     x_nodes_mm = _enforce_spacing_growth(
         x_nodes_mm,
@@ -131,6 +166,9 @@ def build_structured_mesh(
     )
     conductor_index = [[-1 for _ in range(len(x_nodes_mm) - 1)] for _ in range(len(y_nodes_mm) - 1)]
 
+    if ducts:
+        _apply_duct_regions(ducts, x_nodes_mm, y_nodes_mm, base_resistivity)
+
     for idx, cable in enumerate(cables):
         _apply_cable_regions(cable, x_nodes_mm, y_nodes_mm, base_resistivity, conductor_index, idx)
 
@@ -139,6 +177,7 @@ def build_structured_mesh(
         y_nodes_mm=y_nodes_mm,
         thermal_resistivity_k_m_per_w=base_resistivity,
         conductor_index=conductor_index,
+        surface_level_y=scene.config.surface_level_y,
     )
     return MeshBuildOutput(mesh=mesh, cables=cables)
 
@@ -156,6 +195,49 @@ def _collect_cables(scene: PlacementScene) -> List[MeshCableDefinition]:
             if definition:
                 cables.append(definition)
     return cables
+
+
+def _collect_ducts(scene: PlacementScene) -> List[MeshDuctDefinition]:
+    ducts: List[MeshDuctDefinition] = []
+    for item in scene.system_items():
+        system = item.system
+        duct = system.duct
+        if duct is None or not duct.has_valid_geometry():
+            continue
+        inner_radius = max(duct.inner_diameter_mm * 0.5, 0.0)
+        outer_radius = max(duct.outer_diameter_mm * 0.5, inner_radius)
+        wall_res = max(duct.material.thermal_resistivity_k_m_per_w, _MIN_RESISTIVITY)
+        fill_res = max(_duct_fill_resistivity(duct), _MIN_RESISTIVITY)
+
+        offsets = list(system.phase_offsets_mm()) or [(0.0, 0.0)]
+        centres = [(item.pos().x() + dx, item.pos().y() + dy) for dx, dy in offsets]
+
+        if duct.occupancy is DuctOccupancy.THREE_PHASES_PER_DUCT:
+            avg_x = sum(cx for cx, _ in centres) / len(centres)
+            avg_y = sum(cy for _, cy in centres) / len(centres)
+            ducts.append(
+                MeshDuctDefinition(
+                    centre_x_mm=avg_x,
+                    centre_y_mm=avg_y,
+                    inner_radius_mm=inner_radius,
+                    outer_radius_mm=outer_radius,
+                    fill_resistivity_k_m_per_w=fill_res,
+                    wall_resistivity_k_m_per_w=wall_res,
+                )
+            )
+        else:
+            for centre_x_mm, centre_y_mm in centres:
+                ducts.append(
+                    MeshDuctDefinition(
+                        centre_x_mm=centre_x_mm,
+                        centre_y_mm=centre_y_mm,
+                        inner_radius_mm=inner_radius,
+                        outer_radius_mm=outer_radius,
+                        fill_resistivity_k_m_per_w=fill_res,
+                        wall_resistivity_k_m_per_w=wall_res,
+                    )
+                )
+    return ducts
 
 
 def _phase_centres(system: CableSystem, item: CableSystemItem) -> List[Tuple[float, float]]:
@@ -289,18 +371,7 @@ def _build_domain(
         cable_min_x = min(c.centre_x_mm - c.overall_radius_mm for c in cables)
         cable_max_x = max(c.centre_x_mm + c.overall_radius_mm for c in cables)
         max_radius = max((c.overall_radius_mm for c in cables), default=0.0)
-        span_candidates = [
-            cable_max_x - cable_min_x,
-            2.0 * max_radius,
-            grid_step_mm,
-        ]
-        span_x = max(span_candidates)
-        target_width = max(
-            span_x * _DOMAIN_WIDTH_FACTOR,
-            scene.config.trench_width_mm + 2.0 * padding_mm,
-        )
-        half_extra = max(0.0, 0.5 * (target_width - (cable_max_x - cable_min_x)))
-        lateral_margin = max(padding_mm, half_extra)
+        lateral_margin = max(padding_mm, 10.0 * max_radius)
 
         min_x = cable_min_x - lateral_margin
         max_x = cable_max_x + lateral_margin
@@ -309,9 +380,12 @@ def _build_domain(
 
         vertical_margin = max(padding_mm, 10.0 * max_radius)
         cable_bottom = max(c.centre_y_mm + vertical_margin for c in cables)
+        domain_width = max(max_x - min_x, grid_step_mm * 4.0)
+        trench_span = scene.config.trench_width_mm + 2.0 * padding_mm
         target_depth = max(
             scene.config.trench_depth_mm + padding_mm,
-            target_width,
+            trench_span,
+            domain_width,
         )
         min_y = surface_y
         max_y = max(cable_bottom, surface_y + target_depth)
@@ -321,7 +395,7 @@ def _build_domain(
         min_y = surface_y
         max_y = surface_y + max(
             trench_depth + padding_mm,
-            scene.config.trench_width_mm * _DOMAIN_WIDTH_FACTOR,
+            scene.config.trench_width_mm + 2.0 * padding_mm,
         )
 
     gap_limit = _minimum_gap_spacing(cables)
@@ -384,6 +458,48 @@ def _build_base_resistivity(
             row.append(layer_resistivity)
         resistivity.append(row)
     return resistivity
+
+
+def _apply_duct_regions(
+    ducts: Sequence[MeshDuctDefinition],
+    x_nodes_mm: Sequence[float],
+    y_nodes_mm: Sequence[float],
+    resistivity: List[List[float]],
+) -> None:
+    if not ducts:
+        return
+
+    x_centres = _cell_centres(x_nodes_mm)
+    y_centres = _cell_centres(y_nodes_mm)
+
+    for duct in ducts:
+        inner_radius = max(duct.inner_radius_mm, 0.0)
+        outer_radius = max(duct.outer_radius_mm, inner_radius)
+        fill_res = max(duct.fill_resistivity_k_m_per_w, _MIN_RESISTIVITY)
+        wall_res = max(duct.wall_resistivity_k_m_per_w, _MIN_RESISTIVITY)
+
+        min_x = duct.centre_x_mm - outer_radius
+        max_x = duct.centre_x_mm + outer_radius
+        min_y = duct.centre_y_mm - outer_radius
+        max_y = duct.centre_y_mm + outer_radius
+
+        x_indices = [i for i, cx in enumerate(x_centres) if min_x - 1e-6 <= cx <= max_x + 1e-6]
+        y_indices = [j for j, cy in enumerate(y_centres) if min_y - 1e-6 <= cy <= max_y + 1e-6]
+
+        for j in y_indices:
+            cy = y_centres[j]
+            for i in x_indices:
+                cx = x_centres[i]
+                distance = math.hypot(cx - duct.centre_x_mm, cy - duct.centre_y_mm)
+                half_width = 0.5 * (x_nodes_mm[i + 1] - x_nodes_mm[i])
+                half_height = 0.5 * (y_nodes_mm[j + 1] - y_nodes_mm[j])
+                half_diag = math.hypot(half_width, half_height)
+                if distance > outer_radius + half_diag:
+                    continue
+                if distance <= inner_radius + half_diag:
+                    resistivity[j][i] = fill_res
+                else:
+                    resistivity[j][i] = wall_res
 
 
 def _cell_centres(nodes: Sequence[float]) -> List[float]:
@@ -630,7 +746,10 @@ def _enforce_spacing_growth(
         return list(nodes)
 
     current_nodes = sorted(set(nodes))
-    relevant = sorted(set(relevant_positions))
+    relevant = set(relevant_positions)
+    relevant.add(current_nodes[0])
+    relevant.add(current_nodes[-1])
+    relevant = sorted(relevant)
     if not relevant:
         return current_nodes
 
@@ -657,3 +776,12 @@ def _enforce_spacing_growth(
             changed = True
         current_nodes = new_nodes
     return current_nodes
+
+
+def _duct_fill_resistivity(duct: DuctSpecification) -> float:
+    name = duct.material.name.lower() if duct.material.name else ""
+    if "water" in name:
+        return duct.material.thermal_resistivity_k_m_per_w
+    if duct.material.is_metallic:
+        return 1.0
+    return _AIR_GAP_RESISTIVITY
