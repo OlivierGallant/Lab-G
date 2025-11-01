@@ -82,7 +82,10 @@ def _draw_mesh(ax, mesh: StructuredMesh) -> None:
 
 
 def _draw_cables(ax, cables: Iterable[MeshCableDefinition]) -> None:
+    handles: list[plt.Circle] = []
+    labels_seen: set[str] = set()
     for cable in cables:
+        label = cable.label or "Cable"
         circle = plt.Circle(
             (cable.centre_x_mm, cable.centre_y_mm),
             cable.overall_radius_mm,
@@ -90,17 +93,14 @@ def _draw_cables(ax, cables: Iterable[MeshCableDefinition]) -> None:
             color="#d62728",
             linewidth=1.2,
             zorder=2,
+            label=label,
         )
         ax.add_patch(circle)
-        ax.text(
-            cable.centre_x_mm,
-            cable.centre_y_mm,
-            cable.label,
-            fontsize=8,
-            ha="center",
-            va="center",
-            zorder=3,
-        )
+        if label not in labels_seen:
+            handles.append(circle)
+            labels_seen.add(label)
+    if handles:
+        ax.legend(handles=handles, loc="upper right", fontsize=8, frameon=True)
 
 
 def _triangulate_mesh(mesh: StructuredMesh) -> mtri.Triangulation | None:

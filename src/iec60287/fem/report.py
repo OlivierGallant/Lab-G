@@ -104,6 +104,11 @@ def _write_summary(
         "min_field_temp_c": result.min_temp_c,
         "converged": result.converged,
         "iterations": result.iterations,
+        "boundary_flux_w_per_m": {
+            "top": result.top_flux_w_per_m,
+            "sides": result.side_flux_w_per_m,
+            "bottom": result.bottom_flux_w_per_m,
+        },
         "cables": cables_summary,
     }
     summary_path.write_text(json.dumps(payload, indent=2))

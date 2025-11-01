@@ -55,6 +55,9 @@ class CableFemResult:
     iterations: int
     converged: bool
     heat_w_per_m: Sequence[float]
+    top_flux_w_per_m: float
+    side_flux_w_per_m: float
+    bottom_flux_w_per_m: float
 
 
 @dataclass
@@ -148,25 +151,27 @@ class CableFemAnalyzer:
 
         total_nodes = nx * ny
         robin_load = np.zeros(total_nodes, dtype=float)
-        stiffness_matrix = stiffness_matrix.tolil()
         if surface_convection_w_per_m2k > 0.0:
-            x_nodes_m = x_nodes_mm / 1000.0
             convection = float(surface_convection_w_per_m2k)
+            x_nodes_m = x_nodes_mm / 1000.0
+            stiffness_matrix = stiffness_matrix.tolil()
             for i in range(nx - 1):
                 edge_length = abs(x_nodes_m[i + 1] - x_nodes_m[i])
                 if edge_length <= 0.0:
                     continue
-                node_left = i * ny
-                node_right = (i + 1) * ny
+                left_node = i * ny
+                right_node = (i + 1) * ny
                 coeff = convection * edge_length / 6.0
-                stiffness_matrix[node_left, node_left] += 2.0 * coeff
-                stiffness_matrix[node_right, node_right] += 2.0 * coeff
-                stiffness_matrix[node_left, node_right] += coeff
-                stiffness_matrix[node_right, node_left] += coeff
-                load_increment = convection * ambient_temp_c * edge_length / 2.0
-                robin_load[node_left] += load_increment
-                robin_load[node_right] += load_increment
-        stiffness_matrix = stiffness_matrix.tocsr()
+                stiffness_matrix[left_node, left_node] += 2.0 * coeff
+                stiffness_matrix[right_node, right_node] += 2.0 * coeff
+                stiffness_matrix[left_node, right_node] += coeff
+                stiffness_matrix[right_node, left_node] += coeff
+                load = convection * ambient_temp_c * edge_length / 2.0
+                robin_load[left_node] += load
+                robin_load[right_node] += load
+            stiffness_matrix = stiffness_matrix.tocsr()
+        else:
+            stiffness_matrix = stiffness_matrix.tocsr()
 
         direct_solver: Optional[Callable[[NDArray[np.float64]], NDArray[np.float64]]] = None
         if (
@@ -297,6 +302,14 @@ class CableFemAnalyzer:
 
         max_temp = float(np.max(temperatures_grid))
         min_temp = float(np.min(temperatures_grid))
+        top_flux, side_flux, bottom_flux = _compute_boundary_fluxes(
+            x_nodes_mm,
+            y_nodes_mm,
+            temperatures_grid,
+            conductivity_cells,
+            surface_convection_w_per_m2k,
+            ambient_temp_c,
+        )
 
         return CableFemResult(
             grid_x_mm=tuple(map(float, x_nodes_mm)),
@@ -308,6 +321,9 @@ class CableFemAnalyzer:
             iterations=total_iterations,
             converged=solver_converged and outer_converged,
             heat_w_per_m=tuple(float(value) for value in heat_values),
+            top_flux_w_per_m=top_flux,
+            side_flux_w_per_m=side_flux,
+            bottom_flux_w_per_m=bottom_flux,
         )
 
 
@@ -337,6 +353,83 @@ def _update_heat_values(
             heat_values[idx] = new_heat
             updated = True
     return updated
+
+
+def _compute_boundary_fluxes(
+    x_nodes_mm: NDArray[np.float64],
+    y_nodes_mm: NDArray[np.float64],
+    temperatures_grid: NDArray[np.float64],
+    conductivity_cells: NDArray[np.float64],
+    surface_convection_w_per_m2k: float,
+    ambient_temp_c: float,
+) -> tuple[float, float, float]:
+    """Return the heat flux (W/m) through the top, combined sides, and bottom boundaries."""
+    if (
+        x_nodes_mm.size < 2
+        or y_nodes_mm.size < 2
+        or temperatures_grid.shape[0] != y_nodes_mm.size
+        or temperatures_grid.shape[1] != x_nodes_mm.size
+    ):
+        return 0.0, 0.0, 0.0
+
+    temps = np.asarray(temperatures_grid, dtype=float)
+    x_nodes_m = np.asarray(x_nodes_mm, dtype=float) / 1000.0
+    y_nodes_m = np.asarray(y_nodes_mm, dtype=float) / 1000.0
+    dx_segments = np.diff(x_nodes_m)
+    dy_segments = np.diff(y_nodes_m)
+    top_flux = 0.0
+    side_flux_left = 0.0
+    side_flux_right = 0.0
+    bottom_flux = 0.0
+
+    if dx_segments.size and dy_segments.size:
+        # Top boundary: convection or conduction depending on configured h.
+        if surface_convection_w_per_m2k > 0.0:
+            h = float(surface_convection_w_per_m2k)
+            temp_top_left = temps[0, :-1]
+            temp_top_right = temps[0, 1:]
+            avg_temp = 0.5 * (temp_top_left + temp_top_right)
+            top_flux = float(np.sum(h * (avg_temp - ambient_temp_c) * dx_segments))
+        else:
+            if dy_segments.size >= 1:
+                dy = dy_segments[0]
+                for i, dx in enumerate(dx_segments):
+                    t_boundary_avg = 0.5 * (temps[0, i] + temps[0, i + 1])
+                    t_inside_avg = 0.5 * (temps[1, i] + temps[1, i + 1])
+                    k = float(conductivity_cells[0, i])
+                    top_flux += k * (t_inside_avg - t_boundary_avg) / dy * dx
+
+        # Left boundary (x = min)
+        dx_left = x_nodes_m[1] - x_nodes_m[0]
+        if dx_left > 0.0:
+            for j, dy in enumerate(dy_segments):
+                t_boundary_avg = 0.5 * (temps[j, 0] + temps[j + 1, 0])
+                t_inside_avg = 0.5 * (temps[j, 1] + temps[j + 1, 1])
+                k = float(conductivity_cells[j, 0])
+                side_flux_left += k * (t_inside_avg - t_boundary_avg) / dx_left * dy
+
+        # Right boundary (x = max)
+        dx_right = x_nodes_m[-1] - x_nodes_m[-2]
+        if dx_right > 0.0:
+            last_col = conductivity_cells.shape[1] - 1
+            for j, dy in enumerate(dy_segments):
+                t_boundary_avg = 0.5 * (temps[j, -1] + temps[j + 1, -1])
+                t_inside_avg = 0.5 * (temps[j, -2] + temps[j + 1, -2])
+                k = float(conductivity_cells[j, last_col])
+                side_flux_right += -k * (t_boundary_avg - t_inside_avg) / dx_right * dy
+
+        # Bottom boundary (y = max)
+        dy_bottom = y_nodes_m[-1] - y_nodes_m[-2]
+        if dy_bottom > 0.0:
+            last_row = conductivity_cells.shape[0] - 1
+            for i, dx in enumerate(dx_segments):
+                t_boundary_avg = 0.5 * (temps[-1, i] + temps[-1, i + 1])
+                t_inside_avg = 0.5 * (temps[-2, i] + temps[-2, i + 1])
+                k = float(conductivity_cells[last_row, i])
+                bottom_flux += -k * (t_boundary_avg - t_inside_avg) / dy_bottom * dx
+
+    side_flux = side_flux_left + side_flux_right
+    return top_flux, side_flux, bottom_flux
 
 
 def _build_triangular_mesh(

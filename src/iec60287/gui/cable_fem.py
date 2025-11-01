@@ -114,6 +114,7 @@ class CableFEMPanel(QWidget):
         self._max_iterations_spin = QSpinBox(self)
         self._tolerance_spin = QDoubleSpinBox(self)
         self._surface_convection_spin = QDoubleSpinBox(self)
+        self._growth_ratio_spin = QDoubleSpinBox(self)
 
         self._cable_table = QTableWidget(self)
         self._result_table = QTableWidget(self)
@@ -191,6 +192,11 @@ class CableFEMPanel(QWidget):
         self._padding_spin.setSuffix(" mm")
         self._padding_spin.setValue(500.0)
 
+        self._growth_ratio_spin.setRange(0.05, 5.0)
+        self._growth_ratio_spin.setDecimals(2)
+        self._growth_ratio_spin.setSingleStep(0.05)
+        self._growth_ratio_spin.setValue(0.50)
+
         self._max_iterations_spin.setRange(100, 20000)
         self._max_iterations_spin.setValue(5000)
 
@@ -204,6 +210,7 @@ class CableFEMPanel(QWidget):
         form.addRow("Soil thermal ρ", self._soil_resistivity_spin)
         form.addRow("Grid spacing", self._grid_step_spin)
         form.addRow("Domain padding", self._padding_spin)
+        form.addRow("Spacing growth ratio", self._growth_ratio_spin)
         form.addRow("Max iterations", self._max_iterations_spin)
         form.addRow("Convergence tolerance", self._tolerance_spin)
         return group
@@ -254,6 +261,7 @@ class CableFEMPanel(QWidget):
                 self._scene,
                 grid_step_mm=self._grid_step_spin.value(),
                 padding_mm=self._padding_spin.value(),
+                max_growth_ratio=self._growth_ratio_spin.value(),
                 default_resistivity_k_m_per_w=self._soil_resistivity_spin.value(),
             )
         except ValueError as exc:
@@ -357,6 +365,7 @@ class CableFEMPanel(QWidget):
                 self._scene,
                 grid_step_mm=self._grid_step_spin.value(),
                 padding_mm=self._padding_spin.value(),
+                max_growth_ratio=self._growth_ratio_spin.value(),
                 default_resistivity_k_m_per_w=self._soil_resistivity_spin.value(),
             )
         except ValueError as exc:
@@ -421,6 +430,12 @@ class CableFEMPanel(QWidget):
             f"Iterations: {result.iterations} ({'converged' if result.converged else 'max iterations reached'}). "
             f"Field min/max: {result.min_temp_c:.2f}°C / {result.max_temp_c:.2f}°C."
         )
+        flux_info = (
+            f" Flux W/m → top: {result.top_flux_w_per_m:.2f}, "
+            f"sides: {result.side_flux_w_per_m:.2f}, "
+            f"bottom: {result.bottom_flux_w_per_m:.2f}."
+        )
+        info += flux_info
         self._status_label.setText(info)
 
     def _set_result_item(self, row: int, column: int, text: str) -> None:

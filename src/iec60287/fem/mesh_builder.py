@@ -77,17 +77,50 @@ def build_structured_mesh(
     *,
     grid_step_mm: float,
     padding_mm: float,
+    max_growth_ratio: float = 0.5,
     default_resistivity_k_m_per_w: float = 1.0,
 ) -> MeshBuildOutput:
-    """Generate a structured mesh reflecting the scene and trench configuration."""
+    """
+    Generate a structured mesh reflecting the scene and trench configuration.
+
+    Args:
+        scene: Active placement scene.
+        grid_step_mm: Minimum mesh spacing near conductors.
+        padding_mm: Extra distance added around the outermost cables.
+        max_growth_ratio: Multiplier limiting how quickly element size may expand
+            as distance from cables or material interfaces increases. A value of
+            0.5 allows cell widths up to 0.5 * distance from the nearest relevant
+            object (cables, layer boundaries, surface) while never dropping below
+            `grid_step_mm`.
+        default_resistivity_k_m_per_w: Fallback soil resistivity when none is provided.
+    """
     grid_step_mm = max(grid_step_mm, 5.0)
     padding_mm = max(padding_mm, 50.0)
+    max_growth_ratio = max(max_growth_ratio, 0.0)
 
     cables = _collect_cables(scene)
 
     x_nodes_mm, y_nodes_mm = _build_domain(scene, cables, grid_step_mm, padding_mm)
     if len(x_nodes_mm) < 2 or len(y_nodes_mm) < 2:
         raise ValueError("FEM mesh domain is degenerate; adjust grid spacing or padding.")
+
+    x_relevant = [c.centre_x_mm for c in cables]
+    y_relevant = _relevant_y_positions(scene, cables)
+
+    x_nodes_mm = _enforce_spacing_growth(
+        x_nodes_mm,
+        relevant_positions=x_relevant,
+        growth_ratio=max_growth_ratio,
+        min_step=grid_step_mm,
+    )
+    x_nodes_mm = _uniformize_axis_nodes(x_nodes_mm)
+    y_nodes_mm = _enforce_spacing_growth(
+        y_nodes_mm,
+        relevant_positions=y_relevant,
+        growth_ratio=max_growth_ratio,
+        min_step=grid_step_mm,
+    )
+    y_nodes_mm = _uniformize_axis_nodes(y_nodes_mm)
 
     base_resistivity = _build_base_resistivity(
         scene.config.layers,
@@ -568,3 +601,59 @@ def _uniformize_axis_nodes(nodes: Sequence[float]) -> List[float]:
         result[-1] = sorted_nodes[-1]
 
     return result
+
+
+def _relevant_y_positions(
+    scene: PlacementScene,
+    cables: Sequence[MeshCableDefinition],
+) -> List[float]:
+    positions: List[float] = [scene.config.surface_level_y]
+    cumulative = scene.config.surface_level_y
+    for layer in scene.config.layers:
+        thickness = max(layer.thickness_mm, 0.0)
+        cumulative += thickness
+        positions.append(cumulative)
+    positions.extend(c.centre_y_mm for c in cables)
+    return positions
+
+
+def _enforce_spacing_growth(
+    nodes: Sequence[float],
+    *,
+    relevant_positions: Sequence[float],
+    growth_ratio: float,
+    min_step: float,
+) -> List[float]:
+    if len(nodes) < 2:
+        return list(nodes)
+    if growth_ratio <= 0.0 or not relevant_positions:
+        return list(nodes)
+
+    current_nodes = sorted(set(nodes))
+    relevant = sorted(set(relevant_positions))
+    if not relevant:
+        return current_nodes
+
+    min_step = max(min_step, 1e-6)
+    tolerance = 1e-9
+    changed = True
+    while changed:
+        changed = False
+        new_nodes: List[float] = [current_nodes[0]]
+        for a, b in zip(current_nodes, current_nodes[1:]):
+            interval = b - a
+            if interval <= 0.0:
+                continue
+            midpoint = 0.5 * (a + b)
+            dist = min(abs(midpoint - ref) for ref in relevant)
+            allowed = max(min_step, dist * growth_ratio)
+            if interval <= allowed * (1.0 + tolerance):
+                new_nodes.append(b)
+                continue
+            segments = max(1, int(math.ceil(interval / allowed)))
+            step = interval / segments
+            for idx in range(1, segments + 1):
+                new_nodes.append(a + step * idx)
+            changed = True
+        current_nodes = new_nodes
+    return current_nodes
